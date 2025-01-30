@@ -69,24 +69,20 @@ float calculateOscillatorFrequency(
 ) {
     if (pd_dry_signal)
     {
-        if (frequency != pd_frequency) {
+        if (frequency != pd_frequency && pd_frequency < frequency_limit) {
             frequency += (pd_frequency - frequency) / tracking_scale_factor;
         }
     } 
 
-    if (dry_signal_under_threshold) {
-        if (frequency > 0) {
-            frequency += (frequency - pd_frequency - 1) / (tracking_scale_factor / tracking_attack_release_ratio);
-        }
+    if ((dry_signal_under_threshold || frequency > frequency_limit) && frequency > 0) {
+        frequency += (frequency - pd_frequency - 1) / (tracking_scale_factor / tracking_attack_release_ratio);
     }
 
-    if (frequency > frequency_limit) {
+    if ((frequency > frequency_limit * 2 ) || (glitch_switch && ceil(frequency / 5) == ceil(pd_frequency / 5))) {
         frequency = 0;
-    }
+    } 
 
-    if (glitch_switch && ceil(frequency / 5) == ceil(pd_frequency / 5)) {
-        frequency = 0;
-    }
+    //Todo: Add switchable vibrato to this. LFO assigned to frequency, with depth control, affected by tracking_scale_factor (as LFO speed)
 
     return frequency;
 }
@@ -127,15 +123,13 @@ void processAudioBlock(
         const auto dry_signal = in[0][i];
 
         auto fuzz_voice = generateFuzzSignal(dry_signal);
-        auto fuzz_carrier_osc = fuzz_voice;
-        auto fuzz_carrier_sub = fuzz_voice;
 
-        frequency = calculateOscillatorFrequency(pd.get_frequency(), pd(dry_signal), (abs(dry_signal) < 0.000005));
+        frequency = calculateOscillatorFrequency(pd.get_frequency(), pd(dry_signal), (abs(dry_signal) < 0.000005)); //Todo - replace dry_signal level check with real gate
 
         phase.set((frequency * osc_frequency_multiplier), sample_rate);
         const auto osc_signal = (wave_synth.compensated(phase) * s.waveMix());
 
-        auto osc_voice = (osc_signal * fuzz_carrier_osc) + (fuzz_carrier_osc / osc_signal) + (osc_signal * 2.5);
+        auto osc_voice = (osc_signal * fuzz_voice) + (fuzz_voice / osc_signal) + (osc_signal * 2.5);
     
         phase++;
 
@@ -149,11 +143,11 @@ void processAudioBlock(
         sub_phase.set((pd.get_frequency() * (1 / sub_frequency_multiplier)), sample_rate);
 
         auto sub_signal = (sub_wave_synth.compensated(sub_phase) * s.waveMix());
-        auto sub_voice = (sub_signal * fuzz_carrier_sub) + (fuzz_carrier_sub / sub_signal) + (sub_signal * 3);
+        auto sub_voice = (sub_signal * fuzz_voice) + (fuzz_voice / sub_signal) + (sub_signal * 3);
         if (sub_source == 1) {
             sub_voice = (sub_voice * osc_signal) + (osc_signal / sub_voice);
         }
-        auto sub_voice_gated = (synth_envelope * sub_voice * 11); //Multiplied to compensate for gate signal loss?
+        auto sub_voice_gated = (synth_envelope * sub_voice * 11); 
 
         sub_phase++;
 

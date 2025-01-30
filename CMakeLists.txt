@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
-project(TerrariumSynth VERSION 1.0.0)
+project(TerrariumPLL VERSION 1.0.0)
 
-set(FIRMWARE_NAME TerrariumSynth)
+set(FIRMWARE_NAME TerrariumPLL)
 set(FIRMWARE_SOURCES
     main.cpp
     syscalls.c
