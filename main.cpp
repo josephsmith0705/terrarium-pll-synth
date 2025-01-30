@@ -27,12 +27,69 @@ using namespace q::literals;
 Terrarium terrarium;
 EffectState interface_state;
 EffectState preset_state;
-bool enable_effect = false;
+bool enable_effect = true;
 bool use_preset = false;
 bool apply_mod = false;
 bool cycle_mod = false;
 uint32_t mod_duration = 1000; // ms
 float trigger_ratio = 1;
+float frequency = 0;
+float tolerance = 1;
+float tracking_scale_factor = 5; //2 is ALMOST instant, 5 feels smooth, 15 is slow
+float tracking_attack_release_ratio = 2; // the release is x times slower than the attack
+float frequency_limit = 1200;
+float osc_frequency_multiplier = 2;
+float sub_frequency_multiplier= 2;
+float fuzz_threshold = 0.0005;
+bool glitch_switch = false;
+float sub_source = 1; // If set to 1 feed osc into sub osc for glitchiness
+
+float fuzz_level = 0;
+float osc_level = 0;
+float sub_level = 0;
+float effect_level = 0;
+
+float generateFuzzSignal(
+    float drySignal
+) {
+    if (drySignal > fuzz_threshold) {
+        drySignal =- std::exp(-(drySignal - fuzz_threshold));
+    }
+    
+    else if (drySignal < -fuzz_threshold) {
+        drySignal = -fuzz_threshold + std::exp(drySignal + fuzz_threshold);
+    }
+    return drySignal;
+}
+
+float calculateOscillatorFrequency(
+    float pd_frequency,
+    bool pd_dry_signal,
+    bool dry_signal_under_threshold
+) {
+    if (pd_dry_signal)
+    {
+        if (frequency != pd_frequency) {
+            frequency += (pd_frequency - frequency) / tracking_scale_factor;
+        }
+    } 
+
+    if (dry_signal_under_threshold) {
+        if (frequency > 0) {
+            frequency += (frequency - pd_frequency - 1) / (tracking_scale_factor / tracking_attack_release_ratio);
+        }
+    }
+
+    if (frequency > frequency_limit) {
+        frequency = 0;
+    }
+
+    if (glitch_switch && ceil(frequency / 5) == ceil(pd_frequency / 5)) {
+        frequency = 0;
+    }
+
+    return frequency;
+}
 
 void processAudioBlock(
     daisy::AudioHandle::InputBuffer in,
@@ -43,36 +100,19 @@ void processAudioBlock(
     static constexpr auto max_freq = q::pitch_names::F[6];
     static constexpr auto hysteresis = -35_dB;
 
+    static q::peak_envelope_follower envelope_follower(10_ms, terrarium.seed.AudioSampleRate());
+    static q::noise_gate gate(-120_dB);
+    static LinearRamp gate_ramp(0, 0.008);
+
     static const auto sample_rate = terrarium.seed.AudioSampleRate();
 
-    static q::peak_envelope_follower envelope_follower(10_ms, sample_rate);
-    static q::noise_gate gate(-120_dB);
-    static q::rising_edge gate_rising;
-    static LinearRamp gate_ramp(0, 0.008);
     static q::pitch_detector pd(min_freq, max_freq, sample_rate, hysteresis);
     static q::phase_iterator phase;
+    static q::phase_iterator sub_phase;
     static WaveSynth wave_synth;
-    static NoiseSynth noise_synth;
-    static SvFilter low_pass;
-    static SvFilter high_pass;
-    static uint32_t mod_begin = 0;
-    static LinearRamp mod_ramp(0, 0.02);
+    static WaveSynth sub_wave_synth;
 
-    const auto now = terrarium.seed.system.GetNow();
-    const auto mod_elapsed = (now - mod_begin);
-    float meh = 0;
-    const auto base_frac = static_cast<float>(mod_elapsed) / mod_duration;
-    const auto one_shot_frac = std::clamp(base_frac, 0.0f, 0.5f);
-    const auto cycle_frac = std::modf(base_frac, &meh);
-    const auto mod_phase =
-        q::frac_to_phase(cycle_mod ? cycle_frac : one_shot_frac) -
-        q::frac_to_phase(0.25);
-    const auto mod_ratio = mod_ramp((q::sin(mod_phase) + 1) / 2);
-
-    const auto& s =
-        apply_mod ? blended(preset_state, interface_state, mod_ratio) :
-        use_preset ? preset_state :
-        interface_state;
+    const auto& s = interface_state;
 
     constexpr LogMapping trigger_mapping{0.0001, 0.05, 0.4};
     const auto trigger = trigger_mapping(trigger_ratio);
@@ -80,51 +120,44 @@ void processAudioBlock(
     gate.release_threshold(q::lin_to_db(trigger) - 12_dB);
 
     wave_synth.setShape(s.waveShape());
-    noise_synth.setSampleDuration(s.noiseSampleDuration(pd.get_frequency()));
-
-    const auto resonance = s.resonance();
-    const auto lp_corner = s.lowPassCorner(pd.get_frequency());
-    const auto hp_corner = s.highPassCorner(pd.get_frequency());
-    low_pass.config(lp_corner, sample_rate, resonance);
-    high_pass.config(hp_corner, sample_rate, resonance);
+    sub_wave_synth.setShape(s.waveShape());
 
     for (size_t i = 0; i < size; ++i)
     {
         const auto dry_signal = in[0][i];
-        if (pd(dry_signal))
-        {
-            phase.set(pd.get_frequency(), sample_rate);
-            if (pd.is_note_shift())
-            {
-                mod_begin = terrarium.seed.system.GetNow();
-            }
-        }
+
+        auto fuzz_voice = generateFuzzSignal(dry_signal);
+        auto fuzz_carrier_osc = fuzz_voice;
+        auto fuzz_carrier_sub = fuzz_voice;
+
+        frequency = calculateOscillatorFrequency(pd.get_frequency(), pd(dry_signal), (abs(dry_signal) < 0.000005));
+
+        phase.set((frequency * osc_frequency_multiplier), sample_rate);
+        const auto osc_signal = (wave_synth.compensated(phase) * s.waveMix());
+
+        auto osc_voice = (osc_signal * fuzz_carrier_osc) + (fuzz_carrier_osc / osc_signal) + (osc_signal * 2.5);
+    
+        phase++;
 
         const auto no_envelope = 1 / EffectState::max_level;
         const auto dry_envelope = envelope_follower(std::abs(dry_signal));
         const auto gate_state = gate(dry_envelope);
-        if (gate_rising(gate_state))
-        {
-            mod_begin = terrarium.seed.system.GetNow();
-        }
         const auto gate_level = gate_ramp(gate_state ? 1 : 0);
         const auto synth_envelope = gate_level *
             std::lerp(no_envelope, dry_envelope, s.envelopeInfluence());
 
-        const auto oscillator_signal =
-            (wave_synth.compensated(phase) * s.waveMix()) +
-            (noise_synth() * s.noiseMix());
-        low_pass.update(oscillator_signal);
-        high_pass.update(oscillator_signal);
-        const auto filtered_signal =
-            (low_pass.lowPass() * s.lowPassMix()) +
-            (high_pass.highPass() * s.highPassMix());
-        const auto synth_signal = synth_envelope * filtered_signal;
-        phase++;
+        sub_phase.set((pd.get_frequency() * (1 / sub_frequency_multiplier)), sample_rate);
 
-        const auto mix =
-            (dry_signal * s.dryLevel()) + (synth_signal * s.synthLevel());
-        out[0][i] = enable_effect ? mix : dry_signal;
+        auto sub_signal = (sub_wave_synth.compensated(sub_phase) * s.waveMix());
+        auto sub_voice = (sub_signal * fuzz_carrier_sub) + (fuzz_carrier_sub / sub_signal) + (sub_signal * 3);
+        if (sub_source == 1) {
+            sub_voice = (sub_voice * osc_signal) + (osc_signal / sub_voice);
+        }
+        auto sub_voice_gated = (synth_envelope * sub_voice * 11); //Multiplied to compensate for gate signal loss?
+
+        sub_phase++;
+
+        out[0][i] = (fuzz_voice * fuzz_level) + (osc_voice * osc_level) + (sub_voice_gated * sub_level) * effect_level;
         out[1][i] = 0;
     }
 }
@@ -133,117 +166,58 @@ int main()
 {
     terrarium.Init(true);
 
-    auto settings = loadSettings();
-    preset_state = settings.preset;
-    mod_duration = settings.mod_duration;
-
-    auto& knob_dry = terrarium.knobs[0];
-    auto& knob_synth = terrarium.knobs[1];
-    auto& knob_trigger = terrarium.knobs[2];
-    auto& knob_wave = terrarium.knobs[3];
-    auto& knob_filter = terrarium.knobs[4];
-    auto& knob_resonance = terrarium.knobs[5];
-
-    auto& toggle_noise = terrarium.toggles[0];
-    auto& toggle_envelope = terrarium.toggles[1];
-    auto& toggle_modulate = terrarium.toggles[2];
-    auto& toggle_cycle = terrarium.toggles[3];
-
-    auto& stomp_bypass = terrarium.stomps[0];
-    auto& stomp_preset = terrarium.stomps[1];
-
     auto& led_enable = terrarium.leds[0];
-    auto& led_preset = terrarium.leds[1];
-
-    bool preset_written = false;
     Blink blink;
-
-    TapTempo tempo(mod_duration);
-
 
     terrarium.seed.StartAudio(processAudioBlock);
 
+    auto& knob_dry = terrarium.knobs[0];
+
     terrarium.Loop(100, [&](){
-        tempo.Update(terrarium.seed.system.GetNow());
-
-        interface_state.setDryRatio(knob_dry.Process());
-        interface_state.setSynthRatio(knob_synth.Process());
-        trigger_ratio = knob_trigger.Process();
-        interface_state.setWaveRatio(knob_wave.Process());
-        interface_state.setFilterRatio(knob_filter.Process());
-        interface_state.setResonanceRatio(knob_resonance.Process());
-
-        interface_state.setNoiseEnabled(toggle_noise.Pressed());
-        interface_state.setEnvelopeEnabled(toggle_envelope.Pressed());
-        apply_mod = toggle_modulate.Pressed();
-        cycle_mod = toggle_cycle.Pressed();
-
-        if (stomp_bypass.RisingEdge())
-        {
-            enable_effect = !enable_effect;
+        auto knob = knob_dry.Process();
+        if (knob <= 0.2) {
+            fuzz_level = 1;
+            osc_level = 0;
+            sub_level = 0;
         }
-
-        led_enable.Set(enable_effect ? 1 : 0);
-
-
-        if (apply_mod)
-        {
-            if (stomp_preset.RisingEdge())
-            {
-                tempo.Tap();
-                mod_duration = tempo.Interval();
-                preset_written = false;
-            }
-
-            if (blink.enabled())
-            {
-                led_preset.Set(blink.process() ? 1 : 0);
-            }
-            else if (stomp_preset.Pressed())
-            {
-                led_preset.Set(1);
-            }
-            else
-            {
-                const auto brightness = std::abs(2*tempo.Ratio() - 1);
-                led_preset.Set(brightness);
-            }
+        else if (knob <= 0.4) {
+            fuzz_level = 0;
+            osc_level = 1;
+            sub_level = 0;
         }
-        else
-        {
-            if (stomp_preset.RisingEdge())
-            {
-                use_preset = !use_preset;
-                preset_written = false;
-            }
-
-            if (blink.enabled())
-            {
-                led_preset.Set(blink.process() ? 1 : 0);
-            }
-            else
-            {
-                led_preset.Set(use_preset ? 1 : 0);
-            }
+        else if (knob <= 0.6) {
+            fuzz_level = 0;
+            osc_level = 0;
+            sub_level = 1;
         }
-
-        if ((stomp_preset.TimeHeldMs() > 1000) && !preset_written)
-        {
-            preset_state = interface_state;
-
-            settings.preset = preset_state;
-            settings.mod_duration = mod_duration;
-            saveSettings(terrarium.seed.qspi, settings);
-
-            preset_written = true;
-            blink.reset();
+        else if (knob < 0.8) {
+            fuzz_level = 0;
+            osc_level = 1;
+            sub_level = 1;
+        } else {
+            fuzz_level = 1;
+            osc_level = 1;
+            sub_level = 1;
         }
-
-        if ((tempo.SinceTap() > 10000) && (mod_duration != settings.mod_duration))
-        {
-            settings.preset = preset_state;
-            settings.mod_duration = mod_duration;
-            saveSettings(terrarium.seed.qspi, settings);
-        }
+        interface_state.setDryRatio(0.5);
+        interface_state.setSynthRatio(0.5);
+        trigger_ratio = 0.5;
+        interface_state.setWaveRatio(1);
+        interface_state.setFilterRatio(0.5);
+        interface_state.setResonanceRatio(0.5);
+        effect_level = 0.4;
     });
+
+    // interface_state.setSynthRatio(0.5);
+    // trigger_ratio = 0.5;
+    // interface_state.setWaveRatio(1);
+    // interface_state.setFilterRatio(0.5);
+    // interface_state.setResonanceRatio(0.5);
+
+    interface_state.setNoiseEnabled(false);
+    interface_state.setEnvelopeEnabled(false);
+    apply_mod = false;
+    cycle_mod = false;
+
+    led_enable.Set(true);
 }
