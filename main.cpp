@@ -21,20 +21,20 @@ using namespace q::literals;
 
 Terrarium terrarium;
 bool enable_effect = true;
-bool use_preset = false;
-bool apply_mod = false;
-bool cycle_mod = false;
-uint32_t mod_duration = 1000; // ms
 float trigger_ratio = 1;
 float frequency = 0;
 float rate = 0.9; // Map to pot 5 - 0.9 is nice! <0.5 might be too slow
 float tracking_scale_factor = ((2 - rate) * 15) - 14; //2 is ALMOST instant, 5 feels smooth, 15 is slow
 float tracking_attack_release_ratio = 0.001; // smaller = longer divebombs. Map to pot?
-float osc_frequency_multiplier = 4; // Map to pot 4
+float osc_frequency_multiplier = 2; // Map to pot 4
 float sub_frequency_multiplier= 2; // Map to pot 6
 bool glitch_switch = false; // Map to switch
 bool sub_osc_source = false; // Map to switch - feed osc into sub osc for glitchiness
 bool vibrato_switch = false; // Map to switch
+float lfo_value = 1;
+bool lfo_rising = false;
+float lfo_depth_multiplier = 150;
+float lfo_rate_multiplier = 50; // Todo - make a multiple or rate. 15 is slow, 50 is nice. 150 seems to be slow again
 static SvFilter band_pass;
 
 float fuzz_level = 0;
@@ -45,27 +45,21 @@ float effect_level = 0;
 static constexpr q::frequency min_freq = q::pitch_names::Ds[1];
 static constexpr q::frequency max_freq = q::pitch_names::F[7];
 
-float lfo_phase_ = 0;
-float lfo_freq_ = .3f;
-float lfo_amp_ = 200;
-
 float processLfo()
 {
-    lfo_phase_ += lfo_freq_;
-
-    //wrap around and flip direction
-    if(lfo_phase_ > 1.f)
-    {
-        lfo_phase_ = 1.f - (lfo_phase_ - 1.f);
-        lfo_freq_ *= -1.f;
-    }
-    else if(lfo_phase_ < -1.f)
-    {
-        lfo_phase_ = -1.f - (lfo_phase_ + 1.f);
-        lfo_freq_ *= -1.f;
+    if (lfo_value >= 2) {
+        lfo_rising = false;
+    } else if (lfo_value <= 1) {
+        lfo_rising = true;
     }
 
-    return lfo_phase_ * lfo_amp_;
+    if (lfo_rising) {
+        lfo_value += 0.00001 * lfo_rate_multiplier;
+    } else {
+        lfo_value -= 0.00001 * lfo_rate_multiplier;
+    }
+
+    return lfo_value * lfo_depth_multiplier;
 }
 
 float generateFuzzSignal(
@@ -88,7 +82,7 @@ float calculateOscillatorFrequency(
     bool dry_signal_under_threshold
 ) {
     if (vibrato_switch) {
-        pd_frequency += processLfo(); // Todo - make this good. Assign rate to speed, and tracking_scale_factor to depth
+        pd_frequency += processLfo(); // Todo - make this react to frequency. Higher note = higher rate
     }
 
     if (pd_dry_signal && !dry_signal_under_threshold)
@@ -156,7 +150,7 @@ void processAudioBlock(
         band_pass.update(dry_signal);
         float filtered_fuzz = generateFuzzSignal(band_pass.bandPass(), 0.0005); 
 
-        float osc_voice = (filtered_fuzz * 3.5) * osc_signal;
+        float osc_voice = (filtered_fuzz * 3.5) * osc_signal * (frequency == 0 ? 0 : 1);
 
         phase++;
 
