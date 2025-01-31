@@ -10,8 +10,6 @@
 #include <q/support/pitch_names.hpp>
 #include <q/synth/sin_osc.hpp>
 
-#include <util/Blink.h>
-#include <util/EffectState.h>
 #include <util/LinearRamp.h>
 #include <util/Mapping.h>
 #include <util/SvFilter.h>
@@ -22,23 +20,22 @@ namespace q = cycfi::q;
 using namespace q::literals;
 
 Terrarium terrarium;
-EffectState interface_state;
-EffectState preset_state;
-bool enable_effect = false;
+bool enable_effect = true;
 bool use_preset = false;
 bool apply_mod = false;
 bool cycle_mod = false;
 uint32_t mod_duration = 1000; // ms
 float trigger_ratio = 1;
 float frequency = 0;
-float rate = 0.7;
+float rate = 0.8; // Map to pot 5 - 0.9 is nice! <0.5 might be too slow
 float tracking_scale_factor = ((2 - rate) * 15) - 14; //2 is ALMOST instant, 5 feels smooth, 15 is slow
 float tracking_attack_release_ratio = 2; // the release is x times slower than the attack
-float osc_frequency_multiplier = 2;
-float sub_frequency_multiplier= 2;
-float fuzz_threshold = 0.0005;
-bool glitch_switch = false;
-bool sub_osc_source = true; // If set to 1 feed osc into sub osc for glitchiness
+float osc_frequency_multiplier = 2; // Map to pot 4
+float sub_frequency_multiplier= 2; // Map to pot 6
+bool glitch_switch = false; // Map to switch
+bool sub_osc_source = true; // Map to switch - feed osc into sub osc for glitchiness
+bool fuzz_filter_switch = true; // Map to switch - turn fuzz voice into osc, sounds like the eqd data corrupter!
+static SvFilter band_pass;
 
 float fuzz_level = 0;
 float osc_level = 0;
@@ -49,16 +46,17 @@ static constexpr q::frequency min_freq = q::pitch_names::Ds[1];
 static constexpr q::frequency max_freq = q::pitch_names::F[7];
 
 float generateFuzzSignal(
-    float drySignal
+    float dry_signal,
+    float threshold
 ) {
-    if (drySignal > fuzz_threshold) {
-        drySignal =- std::exp(-(drySignal - fuzz_threshold));
+    if (dry_signal > threshold) {
+        dry_signal =- std::exp(-(dry_signal - threshold));
     }
     
-    else if (drySignal < -fuzz_threshold) {
-        drySignal = -fuzz_threshold + std::exp(drySignal + fuzz_threshold);
+    else if (dry_signal < -threshold) {
+        dry_signal = -threshold + std::exp(dry_signal + threshold);
     }
-    return drySignal;
+    return dry_signal;
 }
 
 float calculateOscillatorFrequency(
@@ -77,11 +75,13 @@ float calculateOscillatorFrequency(
         frequency += (frequency - pd_frequency - 1) / (tracking_scale_factor / tracking_attack_release_ratio);
     }
 
-    if ((frequency > as_float(max_freq) * 2 ) || (glitch_switch && ceil(frequency / 5) == ceil(pd_frequency / 5))) {
+    if ((frequency > (as_float(max_freq) * 2)) 
+        || frequency < 0
+        || (glitch_switch && ceil(frequency / 5) == ceil(pd_frequency / 5))) {
         frequency = 0;
     } 
 
-    //Todo: Add switchable vibrato to this. LFO assigned to frequency, with depth control, affected by tracking_scale_factor (as LFO speed)
+    //Todo - Add switchable vibrato to this. LFO assigned to frequency, with depth control, affected by tracking_scale_factor (as LFO speed)
 
     return frequency;
 }
@@ -105,41 +105,42 @@ void processAudioBlock(
     static WaveSynth wave_synth;
     static WaveSynth sub_wave_synth;
 
-    const EffectState& s = interface_state;
-
     constexpr LogMapping trigger_mapping{0.0001, 0.05, 0.4};
     const float trigger = trigger_mapping(trigger_ratio);
     gate.onset_threshold(trigger);
     gate.release_threshold(q::lin_to_db(trigger) - 12_dB);
 
-    wave_synth.setShape(s.waveShape());
-    sub_wave_synth.setShape(s.waveShape());
+    wave_synth.setShape(3);
+    sub_wave_synth.setShape(3);
 
     for (size_t i = 0; i < size; ++i)
     {
         const float dry_signal = in[0][i];
+        band_pass.config(frequency * 2, sample_rate, 12);
+        band_pass.update(dry_signal);
+        float filtered_fuzz = generateFuzzSignal(band_pass.bandPass(), 0.0005);
+        float fuzz_voice = generateFuzzSignal(dry_signal, 0.0005);
 
-        float fuzz_voice = generateFuzzSignal(dry_signal);
+        if (fuzz_filter_switch) {
+            fuzz_voice = filtered_fuzz;
+        }
 
-        frequency = calculateOscillatorFrequency(pd.get_frequency(), pd(dry_signal), (abs(dry_signal) < 0.000005)); //Todo - replace dry_signal level check with real gate
+        frequency = calculateOscillatorFrequency(pd.get_frequency(), pd(dry_signal), (abs(dry_signal) < 0.000005)); //Todo - replace dry_signal level check with real gate for realistic divebombs
 
         phase.set((frequency * osc_frequency_multiplier), sample_rate);
-        const float osc_signal = (wave_synth.compensated(phase) * s.waveMix());
+        const float osc_signal = wave_synth.compensated(phase);
 
-        float osc_voice = (osc_signal * fuzz_voice) + (fuzz_voice / osc_signal) + (osc_signal * 2.5);
+        float osc_voice = (osc_signal * filtered_fuzz) + (filtered_fuzz / osc_signal) + (osc_signal * 2.5);
     
         phase++;
 
-        const float no_envelope = 1 / EffectState::max_level;
         const float dry_envelope = envelope_follower(std::abs(dry_signal));
         const bool gate_state = gate(dry_envelope);
-        const float gate_level = gate_ramp(gate_state ? 1 : 0);
-        const float synth_envelope = gate_level *
-            std::lerp(no_envelope, dry_envelope, s.envelopeInfluence());
+        const float synth_envelope = gate_ramp(gate_state ? 1 : 0);
 
         sub_phase.set((pd.get_frequency() * (1 / sub_frequency_multiplier)), sample_rate);
 
-        float sub_signal = (sub_wave_synth.compensated(sub_phase) * s.waveMix());
+        float sub_signal = sub_wave_synth.compensated(sub_phase);
         float sub_voice = (sub_signal * fuzz_voice) + (fuzz_voice / sub_signal) + (sub_signal * 3);
         if (sub_osc_source) {
             sub_voice = (sub_voice * osc_signal) + (osc_signal / sub_voice);
@@ -148,7 +149,7 @@ void processAudioBlock(
 
         sub_phase++;
 
-        const auto mix = (fuzz_voice * fuzz_level) + (osc_voice * osc_level) + (sub_voice_gated * sub_level) * effect_level;
+        const float mix = (fuzz_voice * fuzz_level) + (osc_voice * osc_level) + (sub_voice_gated * sub_level) * effect_level * 0.6;
 
         out[0][i] = enable_effect ? mix : dry_signal;
         out[1][i] = 0;
@@ -158,10 +159,11 @@ void processAudioBlock(
 int main()
 {
     terrarium.Init(true);
+    terrarium.seed.StartAudio(processAudioBlock);
 
     Led& led_enable = terrarium.leds[0];
 
-    terrarium.seed.StartAudio(processAudioBlock);
+    daisy::Switch& stomp_bypass = terrarium.stomps[0];
 
     daisy::AnalogControl& knob_dry = terrarium.knobs[0];
 
@@ -191,15 +193,9 @@ int main()
             osc_level = 1;
             sub_level = 1;
         }
-        interface_state.setDryRatio(0.5);
-        interface_state.setSynthRatio(0.5);
-        trigger_ratio = 0.5;
-        interface_state.setWaveRatio(1);
-        interface_state.setFilterRatio(0.5);
-        interface_state.setResonanceRatio(0.5);
-        effect_level = 0.4;
 
-        auto& stomp_bypass = terrarium.stomps[0];
+        trigger_ratio = 0.5;
+        effect_level = 0.4; 
 
         if (stomp_bypass.RisingEdge())
         {
@@ -208,9 +204,4 @@ int main()
 
         led_enable.Set(enable_effect ? 1 : 0);
     });
-
-    interface_state.setNoiseEnabled(false);
-    interface_state.setEnvelopeEnabled(false);
-    apply_mod = false;
-    cycle_mod = false;
 }
