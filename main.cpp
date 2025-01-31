@@ -33,8 +33,9 @@ float tracking_attack_release_ratio = 2; // the release is x times slower than t
 float osc_frequency_multiplier = 2; // Map to pot 4
 float sub_frequency_multiplier= 2; // Map to pot 6
 bool glitch_switch = false; // Map to switch
-bool sub_osc_source = true; // Map to switch - feed osc into sub osc for glitchiness
+bool sub_osc_source = false; // Map to switch - feed osc into sub osc for glitchiness
 bool fuzz_filter_switch = true; // Map to switch - turn fuzz voice into osc, sounds like the eqd data corrupter!
+bool vibrato_switch = false; // Map to switch
 static SvFilter band_pass;
 
 float fuzz_level = 0;
@@ -44,6 +45,29 @@ float effect_level = 0;
 
 static constexpr q::frequency min_freq = q::pitch_names::Ds[1];
 static constexpr q::frequency max_freq = q::pitch_names::F[7];
+
+float lfo_phase_ = 0;
+float lfo_freq_ = .3f;
+float lfo_amp_ = 200;
+
+float processLfo()
+{
+    lfo_phase_ += lfo_freq_;
+
+    //wrap around and flip direction
+    if(lfo_phase_ > 1.f)
+    {
+        lfo_phase_ = 1.f - (lfo_phase_ - 1.f);
+        lfo_freq_ *= -1.f;
+    }
+    else if(lfo_phase_ < -1.f)
+    {
+        lfo_phase_ = -1.f - (lfo_phase_ + 1.f);
+        lfo_freq_ *= -1.f;
+    }
+
+    return lfo_phase_ * lfo_amp_;
+}
 
 float generateFuzzSignal(
     float dry_signal,
@@ -64,6 +88,10 @@ float calculateOscillatorFrequency(
     bool pd_dry_signal,
     bool dry_signal_under_threshold
 ) {
+    if (vibrato_switch) {
+        pd_frequency += processLfo(); // Todo - make this good. Assign rate to speed, and tracking_scale_factor to depth
+    }
+
     if (pd_dry_signal)
     {
         if (frequency != pd_frequency && pd_frequency < as_float(max_freq)) {
@@ -80,9 +108,6 @@ float calculateOscillatorFrequency(
         || (glitch_switch && ceil(frequency / 5) == ceil(pd_frequency / 5))) {
         frequency = 0;
     } 
-
-    //Todo - Add switchable vibrato to this. LFO assigned to frequency, with depth control, affected by tracking_scale_factor (as LFO speed)
-
     return frequency;
 }
 
@@ -118,11 +143,11 @@ void processAudioBlock(
         const float dry_signal = in[0][i];
         band_pass.config(frequency * 2, sample_rate, 12);
         band_pass.update(dry_signal);
-        float filtered_fuzz = generateFuzzSignal(band_pass.bandPass(), 0.0005);
+        float filtered_fuzz = generateFuzzSignal(band_pass.bandPass(), 0.0005); // Todo - More fuzz?
         float fuzz_voice = generateFuzzSignal(dry_signal, 0.0005);
 
         if (fuzz_filter_switch) {
-            fuzz_voice = filtered_fuzz;
+            fuzz_voice = filtered_fuzz; // Should probably just make this the osc_voice. Or mix it in with osc_signal
         }
 
         frequency = calculateOscillatorFrequency(pd.get_frequency(), pd(dry_signal), (abs(dry_signal) < 0.000005)); //Todo - replace dry_signal level check with real gate for realistic divebombs
@@ -131,7 +156,7 @@ void processAudioBlock(
         const float osc_signal = wave_synth.compensated(phase);
 
         float osc_voice = (osc_signal * filtered_fuzz) + (filtered_fuzz / osc_signal) + (osc_signal * 2.5);
-    
+
         phase++;
 
         const float dry_envelope = envelope_follower(std::abs(dry_signal));
@@ -168,7 +193,7 @@ int main()
     daisy::AnalogControl& knob_dry = terrarium.knobs[0];
 
     terrarium.Loop(100, [&](){
-        float knob = knob_dry.Process();
+        float knob = knob_dry.Process(); // Todo - map to pots 1 2 & 3
         if (knob <= 0.2) {
             fuzz_level = 1;
             osc_level = 0;
