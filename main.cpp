@@ -27,14 +27,13 @@ bool cycle_mod = false;
 uint32_t mod_duration = 1000; // ms
 float trigger_ratio = 1;
 float frequency = 0;
-float rate = 0.8; // Map to pot 5 - 0.9 is nice! <0.5 might be too slow
+float rate = 0.9; // Map to pot 5 - 0.9 is nice! <0.5 might be too slow
 float tracking_scale_factor = ((2 - rate) * 15) - 14; //2 is ALMOST instant, 5 feels smooth, 15 is slow
-float tracking_attack_release_ratio = 2; // the release is x times slower than the attack
-float osc_frequency_multiplier = 2; // Map to pot 4
+float tracking_attack_release_ratio = 0.001; // smaller = longer divebombs. Map to pot?
+float osc_frequency_multiplier = 4; // Map to pot 4
 float sub_frequency_multiplier= 2; // Map to pot 6
 bool glitch_switch = false; // Map to switch
 bool sub_osc_source = false; // Map to switch - feed osc into sub osc for glitchiness
-bool fuzz_filter_switch = true; // Map to switch - turn fuzz voice into osc, sounds like the eqd data corrupter!
 bool vibrato_switch = false; // Map to switch
 static SvFilter band_pass;
 
@@ -92,19 +91,19 @@ float calculateOscillatorFrequency(
         pd_frequency += processLfo(); // Todo - make this good. Assign rate to speed, and tracking_scale_factor to depth
     }
 
-    if (pd_dry_signal)
+    if (pd_dry_signal && !dry_signal_under_threshold)
     {
         if (frequency != pd_frequency && pd_frequency < as_float(max_freq)) {
             frequency += (pd_frequency - frequency) / tracking_scale_factor;
         }
     } 
 
-    if ((dry_signal_under_threshold || frequency > as_float(max_freq)) && frequency > 0) {
+    if ((dry_signal_under_threshold || pd_frequency > as_float(max_freq)) && frequency > 0) {
         frequency += (frequency - pd_frequency - 1) / (tracking_scale_factor / tracking_attack_release_ratio);
     }
 
     if ((frequency > (as_float(max_freq) * 2)) 
-        || frequency < 0
+        || (frequency < 0)
         || (glitch_switch && ceil(frequency / 5) == ceil(pd_frequency / 5))) {
         frequency = 0;
     } 
@@ -141,36 +140,37 @@ void processAudioBlock(
     for (size_t i = 0; i < size; ++i)
     {
         const float dry_signal = in[0][i];
-        band_pass.config(frequency * 2, sample_rate, 12);
-        band_pass.update(dry_signal);
-        float filtered_fuzz = generateFuzzSignal(band_pass.bandPass(), 0.0005); // Todo - More fuzz?
-        float fuzz_voice = generateFuzzSignal(dry_signal, 0.0005);
-
-        if (fuzz_filter_switch) {
-            fuzz_voice = filtered_fuzz; // Should probably just make this the osc_voice. Or mix it in with osc_signal
-        }
-
-        frequency = calculateOscillatorFrequency(pd.get_frequency(), pd(dry_signal), (abs(dry_signal) < 0.000005)); //Todo - replace dry_signal level check with real gate for realistic divebombs
-
-        phase.set((frequency * osc_frequency_multiplier), sample_rate);
-        const float osc_signal = wave_synth.compensated(phase);
-
-        float osc_voice = (osc_signal * filtered_fuzz) + (filtered_fuzz / osc_signal) + (osc_signal * 2.5);
-
-        phase++;
 
         const float dry_envelope = envelope_follower(std::abs(dry_signal));
         const bool gate_state = gate(dry_envelope);
         const float synth_envelope = gate_ramp(gate_state ? 1 : 0);
 
-        sub_phase.set((pd.get_frequency() * (1 / sub_frequency_multiplier)), sample_rate);
+        float fuzz_voice = generateFuzzSignal(dry_signal, 0.0005) * synth_envelope;
+
+        frequency = calculateOscillatorFrequency(pd.get_frequency(), pd(dry_signal), (synth_envelope == 0));
+
+        phase.set((frequency * osc_frequency_multiplier), sample_rate);
+        const float osc_signal = wave_synth.compensated(phase);
+
+        band_pass.config(frequency, sample_rate, 12);
+        band_pass.update(dry_signal);
+        float filtered_fuzz = generateFuzzSignal(band_pass.bandPass(), 0.0005); 
+
+        float osc_voice = (filtered_fuzz * 3.5) * osc_signal;
+
+        phase++;
+
+        float sub_frequency = pd.get_frequency() * (1 / sub_frequency_multiplier);
+        sub_phase.set(sub_frequency, sample_rate);
 
         float sub_signal = sub_wave_synth.compensated(sub_phase);
         float sub_voice = (sub_signal * fuzz_voice) + (fuzz_voice / sub_signal) + (sub_signal * 3);
+
         if (sub_osc_source) {
             sub_voice = (sub_voice * osc_signal) + (osc_signal / sub_voice);
         }
-        float sub_voice_gated = (synth_envelope * sub_voice * 11); 
+
+        float sub_voice_gated = (synth_envelope * sub_voice * 1.5); 
 
         sub_phase++;
 
