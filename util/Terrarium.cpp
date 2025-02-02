@@ -1,12 +1,19 @@
 #include "Terrarium.h"
 
-void Terrarium::Init(bool boost)
+void Terrarium::Init(bool boost, bool oled, bool encoder)
 {
     seed.Init(boost);
     InitKnobs();
     InitToggles();
     InitStomps();
     InitLeds();
+
+    if(oled) {
+        InitDisplay();
+    }
+    if(encoder) {
+        InitEncoder();
+    }
 }
 
 void Terrarium::Loop(float frequency, std::function<void()> callback)
@@ -30,6 +37,22 @@ void Terrarium::Loop(float frequency, std::function<void()> callback)
         {
             stomp.Debounce();
         }
+
+        if(encoder.Increment() != 0) {
+            encoder_value += encoder.Increment();
+            if(encoder_value > encoder_value_limit) {
+                encoder_value = 0;
+            }
+            if(encoder_value < 0) {
+                encoder_value = encoder_value_limit;
+            }
+        }
+
+        UpdateMenu();
+
+        encoder.Debounce();
+
+        display.Update();
 
         callback();
 
@@ -104,4 +127,41 @@ void Terrarium::InitLeds()
     {
         leds[i].Init(led_dacs[i]);
     }
+}
+
+void Terrarium::InitDisplay()
+{
+    /** Configure the Display */
+    I2COledDisplay::Config disp_cfg;
+    disp_cfg.driver_config.transport_config.i2c_config.pin_config.scl = daisy::seed::D11; //hw.GetPin(11);
+    disp_cfg.driver_config.transport_config.i2c_config.pin_config.sda = daisy::seed::D12; //hw.GetPin(12);
+    /** And Initialize */
+    display.Init(disp_cfg);
+    display.Fill(false);
+    display.SetCursor(64, 32);
+    daisy::Rectangle bounds = display.GetBounds();
+
+    char welcome_message[128];
+    sprintf(welcome_message, "Hello :)");
+
+    display.WriteStringAligned(welcome_message, Font_11x18, bounds, daisy::Alignment::centered, true);
+    display.Update();
+    System::Delay(500);
+}
+
+void Terrarium::InitEncoder()
+{
+    encoder.Init(daisy::seed::D6, daisy::seed::D5, daisy::seed::D4); //a, b, click
+}
+
+void Terrarium::UpdateMenu()
+{
+    display.Fill(false);
+
+    char encoderval[128];
+    sprintf(encoderval, "Page %d", encoder_value);
+
+    daisy::Rectangle bounds = display.GetBounds();
+
+    display.WriteStringAligned(encoderval, Font_11x18, bounds, daisy::Alignment::centered, true);
 }

@@ -7,20 +7,14 @@
 
 #include <util/Terrarium.h>
 #include <util/PLL.h>
-#include <util/RiskierEncoder.h>
 
 #include <stdio.h>
 #include <string.h>
-#include <dev/oled_ssd130x.h>
 
 namespace q = cycfi::q;
 using namespace q::literals;
-using MyOledDisplay = daisy::OledDisplay<daisy::SSD130xI2c128x64Driver>;
 
 Terrarium terrarium;
-daisy::DaisySeed     hw;
-MyOledDisplay display;
-RiskierEncoder encoder;
 PLL pll;
 
 bool enable_effect = true;
@@ -33,15 +27,13 @@ bool vibrato_switch = false; // Map to switch
 float lfo_value = 1;
 bool lfo_rising = false;
 float lfo_depth_multiplier = 150;
-float lfo_rate_multiplier = 50; // Todo - make a multiple or rate. 15 is slow, 50 is nice. 150 seems to be slow again
+float lfo_rate_multiplier = 50; // Todo - make a multiple of rate. 15 is slow, 50 is nice. 150 seems to be slow again
 int encoder_value = 0;
 
 float fuzz_level = 0;
 float osc_level = 0;
 float sub_level = 0;
 float effect_level = 0;
-
-
 
 float processLfo()
 {
@@ -72,7 +64,6 @@ void processAudioBlock(
         const float dry_signal = in[0][i];
 
         float mix = pll.Process(dry_signal) * effect_level;
-        // float mix = dry_signal;
 
         out[0][i] = enable_effect ? mix : dry_signal;
         out[1][i] = 0;
@@ -81,21 +72,10 @@ void processAudioBlock(
 
 int main()
 {
-    hw.Configure();
-
-    /** Configure the Display */
-    MyOledDisplay::Config disp_cfg;
-    disp_cfg.driver_config.transport_config.i2c_config.pin_config.scl    = hw.GetPin(11);
-    disp_cfg.driver_config.transport_config.i2c_config.pin_config.sda = hw.GetPin(12);
-    /** And Initialize */
-    display.Init(disp_cfg);
-
-    encoder.Init(hw.GetPin(6), hw.GetPin(5), hw.GetPin(4)); //a, b, click
-
-    terrarium.Init(true);
+    terrarium.Init(false, true, true);
     terrarium.seed.StartAudio(processAudioBlock);
 
-    // Led& led_enable = terrarium.leds[0];
+    TerrariumLed& led_enable = terrarium.leds[0];
 
     daisy::Switch& stomp_bypass = terrarium.stomps[0];
 
@@ -137,52 +117,43 @@ int main()
             enable_effect = !enable_effect;
         }
 
-        // led_enable.Set(enable_effect ? 0.5 : 0);
-        hw.SetLed(enable_effect);
+        led_enable.Set(enable_effect ? 0.5 : 0);
+        // hw.SetLed(enable_effect);
 
-        display.Fill(false);
-        float y;
-        float prevx;
-        float prevy;
+        // float y;
+        // float prevx;
+        // float prevy;
 
         // Todo - Move oscilliscope to function
-        for(int x = 0; x <= 128; x++) { 
+        // for(int x = 0; x <= 128; x++) { 
 
-            int amplitude = 64;
-            y = abs((amplitude / 2) * (sin((x - (3 * M_PI / 2)) * (pll.frequency * 0.005)) - 1));
+        //     int amplitude = 64;
+        //     y = abs((amplitude / 2) * (sin((x - (3 * M_PI / 2)) * (pll.frequency * 0.005)) - 1));
 
-            if(pll.frequency != 0) {
-                if(x == 0) {
-                    display.DrawPixel(x, y, true);
-                } else {
-                    display.DrawLine(prevx, prevy, x, y, true);
-                }
+        //     if(pll.frequency != 0) {
+        //         if(x == 0) {
+        //             terrarium.display.DrawPixel(x, y, true);
+        //         } else {
+        //             terrarium.display.DrawLine(prevx, prevy, x, y, true);
+        //         }
 
-                for(int under_y=128; under_y>=y; under_y--) {
-                    display.DrawPixel(x, under_y, true);
-                }
+        //         for(int under_y=128; under_y>=y; under_y--) {
+        //             terrarium.display.DrawPixel(x, under_y, true);
+        //         }
 
-                prevx = x;
-                prevy = y;
-            }
+        //         prevx = x;
+        //         prevy = y;
+        //     }
+        // }
+
+        // char encoder_value_char[128];
+        // sprintf(encoder_value_char, "%d", encoder_value);
+
+        // terrarium.display.SetCursor(0, 0);
+        // terrarium.display.WriteString(encoder_value_char, Font_7x10, true);
+
+        if(terrarium.encoder.Pressed()) {
+            terrarium.display.Fill(false);
         }
-
-        if(encoder.Increment() != 0) {
-            encoder_value += encoder.Increment();
-        }
-
-        char encoder_value_char[128];
-        sprintf(encoder_value_char, "%d", encoder_value);
-
-        display.SetCursor(0, 0);
-        display.WriteString(encoder_value_char, Font_7x10, true);
-
-        if(encoder.Pressed()) {
-            display.Fill(true);
-        }
-
-        encoder.Debounce();
-
-        display.Update();
     });
 }

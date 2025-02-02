@@ -2,7 +2,7 @@
 
 #include <daisy_seed.h>
 
-class Led
+class TerrariumLed
 {
 public:
     // Call this method before using other members of this class.
