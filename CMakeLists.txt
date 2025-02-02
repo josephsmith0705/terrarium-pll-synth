@@ -12,6 +12,8 @@ set(FIRMWARE_SOURCES
     util/LinearRamp.h
     util/Mapping.h
     util/NoiseSynth.h
+    util/Fuzz.h
+    util/PLL.h
     util/RiskierEncoder.h
     util/PersistentSettings.h
     util/PersistentSettings.cpp
