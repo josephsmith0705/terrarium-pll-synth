@@ -147,13 +147,11 @@ int main()
 
         // Todo - Move oscilliscope to function
         for(int x = 0; x <= 128; x++) { 
-            
-            // y = abs(sin((0.0025 * frequency * (x)) - 1)) * 32;
 
             int amplitude = 64;
-            y = abs((amplitude / 2) * (sin((x - (3 * M_PI / 2)) * (frequency * 0.0001)) - 1));
+            y = abs((amplitude / 2) * (sin((x - (3 * M_PI / 2)) * (pll.frequency * 0.005)) - 1));
 
-            if(frequency != 0) {
+            if(pll.frequency != 0) {
                 if(x == 0) {
                     display.DrawPixel(x, y, true);
                 } else {
