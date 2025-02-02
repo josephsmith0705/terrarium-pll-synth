@@ -19,6 +19,8 @@ set(FIRMWARE_SOURCES
     util/Terrarium.h
     util/Terrarium.cpp
     util/WaveSynth.h
+    util/RiskierEncoder.h
+    util/RiskierEncoder.cpp
 )
 set(LIBDAISY_DIR ${CMAKE_SOURCE_DIR}/lib/libDaisy)
 include(${LIBDAISY_DIR}/cmake/default_build.cmake)
