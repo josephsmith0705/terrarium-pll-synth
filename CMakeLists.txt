@@ -12,6 +12,7 @@ set(FIRMWARE_SOURCES
     util/LinearRamp.h
     util/Mapping.h
     util/NoiseSynth.h
+    util/RiskierEncoder.h
     util/PersistentSettings.h
     util/PersistentSettings.cpp
     util/SvFilter.h
@@ -19,8 +20,6 @@ set(FIRMWARE_SOURCES
     util/Terrarium.h
     util/Terrarium.cpp
     util/WaveSynth.h
-    util/RiskierEncoder.h
-    util/RiskierEncoder.cpp
 )
 set(LIBDAISY_DIR ${CMAKE_SOURCE_DIR}/lib/libDaisy)
 include(${LIBDAISY_DIR}/cmake/default_build.cmake)

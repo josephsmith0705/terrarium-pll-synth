@@ -98,7 +98,7 @@ float calculateOscillatorFrequency(
 
     if (pd_dry_signal && !dry_signal_under_threshold)
     {
-        // Todo - fix glitch where frequency goes high
+        // Todo - fix glitch where frequency goes high. Seems to happen when the oscillator is tracking up THEN signal stops
         if (frequency != pd_frequency && pd_frequency < as_float(max_freq)) {
             frequency += (pd_frequency - frequency) / tracking_scale_factor;
         }
@@ -200,9 +200,7 @@ int main()
     /** And Initialize */
     display.Init(disp_cfg);
 
-    // display.Fill(false);
-    // display.SetCursor(0, 0);
-    // display.Update();
+    encoder.Init(hw.GetPin(6), hw.GetPin(5), hw.GetPin(4)); //a, b, click
 
     terrarium.Init(true);
     terrarium.seed.StartAudio(processAudioBlock);
@@ -256,9 +254,13 @@ int main()
         float prevx;
         float prevy;
 
-        // Move oscilliscope to function
+        // Todo - Move oscilliscope to function
         for(int x = 0; x <= 128; x++) { 
-            y = (sin(0.001 * frequency * x) + 1) * 32;
+            
+            // y = abs(sin((0.0025 * frequency * (x)) - 1)) * 32;
+
+            int amplitude = 64;
+            y = abs((amplitude / 2) * (sin((x - (3 * M_PI / 2)) * (frequency * 0.0025)) - 1));
 
             if(frequency != 0) {
                 if(x == 0) {
@@ -267,13 +269,17 @@ int main()
                     display.DrawLine(prevx, prevy, x, y, true);
                 }
 
+                for(int under_y=128; under_y>=y; under_y--) {
+                    display.DrawPixel(x, under_y, true);
+                }
+
                 prevx = x;
                 prevy = y;
             }
         }
 
-        if(encoder.GetIncrement() != 0) {
-            encoder_value += encoder.GetIncrement();
+        if(encoder.Increment() != 0) {
+            encoder_value += encoder.Increment();
         }
 
         char encoder_value_char[128];
@@ -285,6 +291,8 @@ int main()
         if(encoder.Pressed()) {
             display.Fill(true);
         }
+
+        encoder.Debounce();
 
         display.Update();
     });
