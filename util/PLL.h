@@ -25,15 +25,11 @@ class PLL
     public:
         inline void Init(float sr);
         inline float Process(float dry_signal);
-        float sub_level = 0.3;
-        float osc_level = 0.7; // Todo - balance
-        float fuzz_level = 0.5;
+        int fuzz_level = 5, sub_level = 5, osc_level = 5;
         // float rate = 0.1; // Map to pot 5 - 0.9 is nice, but a bit slow! <0.5 might be too slow
-        float tracking_scale_factor = 2; // 5 is slowish. 2 is reasonable.
-        float tracking_attack_release_ratio = 5; // bigger = longer divebombs. 2 is reasonable. 5 is big! Map to pot?
-        float osc_frequency_multiplier = 3; // Map to pot 4
-        float sub_frequency_multiplier= 2; // Map to pot 6
-        float trigger_ratio = 0.5;
+        int tracking_scale_factor = 1, tracking_attack_release_ratio = 1; // bigger = longer divebombs. 2-3 is reasonable. 5 is big!
+        int osc_frequency_multiplier = 1, sub_frequency_multiplier = 1; 
+        float trigger_ratio;
         float frequency;
 
     private:
@@ -91,18 +87,21 @@ float PLL::GenerateOscVoice(float dry_signal, float osc_frequency, bool gate) {
     UpdateOscillatorFrequency(osc_frequency, !gate);
 
     phase.set((frequency), sample_rate);
-    const float osc_signal = wave_synth.compensated(phase);
+    const float osc_signal = wave_synth.compensated(phase); // Todo change to const
 
     phase++;
 
+    if(!gate) {
+        dry_signal = 1;
+    }
+
     band_pass.config(frequency, sample_rate, 30); 
     band_pass.update(dry_signal);
-    float filtered_fuzz = fuzz.Process(dry_signal, 0.0005) / 3; 
+    float filtered_fuzz = fuzz.Process(dry_signal, 0.05) / 3; 
 
-    float osc_voice = (((filtered_fuzz * osc_signal) + (filtered_fuzz / osc_signal))) * 10;
-    if(!gate) {
-        osc_voice = osc_signal * 8;
-    }
+
+
+    float osc_voice = ((((filtered_fuzz * osc_signal) + (filtered_fuzz / osc_signal))) * 10) + (osc_signal * 8);
 
     return osc_voice;
 }
@@ -116,10 +115,11 @@ float PLL::GenerateSubVoice(float fuzz_voice, float sub_frequency, float envelop
     // if (sub_osc_source) {
     //     sub_voice = GenerateOscVoice(sub_signal, sub_frequency, envelope != 0);
     // } else {
-        sub_voice = (sub_signal * fuzz_voice) + (fuzz_voice / sub_signal) + (sub_signal * 3);
+        sub_voice = (sub_signal * fuzz_voice) + (fuzz_voice / sub_signal) + (sub_signal * 10);
     // }
 
     sub_phase++;
+    return sub_signal * fuzz_voice * envelope;
     return sub_voice * envelope;
 }
 
@@ -128,17 +128,19 @@ float PLL::Process(float dry_signal) {
 
     float gate_envelope = CreateGate(dry_signal);
 
-    float fuzz_voice = fuzz.Process(dry_signal, 0.005);
+    float fuzz_voice = fuzz.Process(dry_signal, 0.005) * 0.5;
 
     pd(dry_signal);
     
     float osc_frequency = pd.get_frequency() * osc_frequency_multiplier;
     float osc_voice = GenerateOscVoice(dry_signal, osc_frequency, gate_envelope != 0);
 
+    // return osc_voice + (fuzz_voice * 0);
+
     float sub_fuzz = fuzz_voice;
-    float sub_frequency = pd.get_frequency() * (1 / sub_frequency_multiplier);
+    float sub_frequency = pd.get_frequency() / sub_frequency_multiplier;
     float sub_voice = GenerateSubVoice(sub_fuzz, sub_frequency, gate_envelope);
     
-    float mix = (fuzz_voice * fuzz_level) + (osc_voice * osc_level) + (sub_voice * sub_level);
+    float mix = (fuzz_voice * fuzz_level * 0.1) + (osc_voice * osc_level * 0.1) + (sub_voice * sub_level * 0.1);
     return mix;
 }

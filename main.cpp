@@ -28,12 +28,16 @@ float lfo_value = 1;
 bool lfo_rising = false;
 float lfo_depth_multiplier = 150;
 float lfo_rate_multiplier = 50; // Todo - make a multiple of rate. 15 is slow, 50 is nice. 150 seems to be slow again
-int encoder_value = 0;
 
-float fuzz_level = 0;
-float osc_level = 0;
-float sub_level = 0;
-float effect_level = 0;
+int effect_level = 5;
+
+struct Page
+{
+    std::string name;
+    int* value;
+};
+
+std::vector<Page> pages;
 
 float processLfo()
 {
@@ -63,7 +67,7 @@ void processAudioBlock(
     {
         const float dry_signal = in[0][i];
 
-        float mix = pll.Process(dry_signal) * effect_level;
+        float mix = pll.Process(dry_signal) * effect_level * 0.1;
 
         out[0][i] = enable_effect ? mix : dry_signal;
         out[1][i] = 0;
@@ -81,36 +85,28 @@ int main()
 
     // daisy::AnalogControl& knob_dry = terrarium.knobs[0];
 
-    terrarium.Loop(100, [&](){
-        // float knob = knob_dry.Process(); // Todo - map to pots 1 2 & 3
-        float knob = 1;
-        if (false && knob <= 0.2) {
-            fuzz_level = 1;
-            osc_level = 0;
-            sub_level = 0;
-        // }
-        // else if (knob <= 0.4) {
-        //     fuzz_level = 0;
-        //     osc_level = 1;
-        //     sub_level = 0;
-        // }
-        // else if (knob <= 0.6) {
-        //     fuzz_level = 0;
-        //     osc_level = 0;
-        //     sub_level = 1;
-        // }
-        // else if (knob < 0.8) {
-        //     fuzz_level = 0;
-        //     osc_level = 1;
-        //     sub_level = 1;
-        } else {
-            fuzz_level = 1;
-            osc_level = 0.5;
-            sub_level = 0.5;
-        }
+    char page_value_buffer[128];
+    std::string page_name;
+    int page_value;
+    int selected_page;
+    bool selected = false;
+    pll.osc_frequency_multiplier = 2;
+    pll.sub_frequency_multiplier = 2;
+    int y = 0;
 
-        // trigger_ratio = 0.5;
-        effect_level = 0.2; 
+    pages = {
+        {"Fuzz", &pll.fuzz_level},
+        {"Sub", &pll.sub_level},
+        {"Osc", &pll.osc_level},
+        {"Sub Freq", &pll.sub_frequency_multiplier},
+        {"Osc Freq", &pll.osc_frequency_multiplier},
+        {"Rate", &pll.tracking_scale_factor},
+        {"Release", &pll.tracking_attack_release_ratio},
+        {"Level", &effect_level},
+    };
+
+    terrarium.Loop(25, [&](){
+        pll.trigger_ratio = 0.5;
 
         if (stomp_bypass.RisingEdge())
         {
@@ -118,13 +114,15 @@ int main()
         }
 
         led_enable.Set(enable_effect ? 0.5 : 0);
-        // hw.SetLed(enable_effect);
 
+        // Todo - move to function DrawSine
         // float y;
         // float prevx;
         // float prevy;
 
-        // Todo - Move oscilliscope to function
+        // terrarium.display.Fill(false);
+
+        // // Todo - Move oscilliscope to function
         // for(int x = 0; x <= 128; x++) { 
 
         //     int amplitude = 64;
@@ -146,14 +144,42 @@ int main()
         //     }
         // }
 
-        // char encoder_value_char[128];
-        // sprintf(encoder_value_char, "%d", encoder_value);
+        // terrarium.display.DrawLine(0, y-1, 128, y-1, false);
 
-        // terrarium.display.SetCursor(0, 0);
-        // terrarium.display.WriteString(encoder_value_char, Font_7x10, true);
+        // Todo - move to function DrawSelect
+        terrarium.display.Fill(selected);
+        terrarium.display.DrawLine(0, y, 128, y, !selected);
+        y++;
+        if(y > 64) {
+            y = 0;
+        }
 
         if(terrarium.encoder.Pressed()) {
-            terrarium.display.Fill(false);
+            selected = !selected;
+            if (selected) {
+                selected_page = terrarium.encoder_value;
+            }
         }
+
+        if(terrarium.encoder_value >= (signed)pages.size()) {
+            terrarium.encoder_value = 0;
+        } else if (terrarium.encoder_value < 0) {
+            terrarium.encoder_value = pages.size() - 1;
+        }
+
+        // Todo - move to terrarium UpdateMenu
+        if(selected) { // Use encoder value to change param value
+            page_name = pages[selected_page].name;
+            *pages[selected_page].value += terrarium.encoder.Increment();
+            page_value = *pages[selected_page].value;
+        } else { // Use encoder to change page
+            page_name = pages[terrarium.encoder_value].name;
+            page_value = *pages[terrarium.encoder_value].value;
+        }
+
+        sprintf(page_value_buffer, "%d", page_value);
+
+        terrarium.display.WriteStringAligned(page_name.c_str(), Font_7x10, terrarium.display_bounds, daisy::Alignment::topCentered, true);
+        terrarium.display.WriteStringAligned(page_value_buffer, Font_7x10, terrarium.display_bounds, daisy::Alignment::centered, true);
     });
 }

@@ -40,6 +40,7 @@ public:
     std::array<TerrariumLed, led_count> leds;
     I2COledDisplay display;
     RiskierEncoder encoder;
+    daisy::Rectangle display_bounds;
 
     int encoder_value = 0;
     int encoder_value_limit = 2;

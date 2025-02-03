@@ -39,16 +39,16 @@ void Terrarium::Loop(float frequency, std::function<void()> callback)
         }
 
         if(encoder.Increment() != 0) {
-            encoder_value += encoder.Increment();
-            if(encoder_value > encoder_value_limit) {
-                encoder_value = 0;
-            }
-            if(encoder_value < 0) {
-                encoder_value = encoder_value_limit;
-            }
+            encoder_value += encoder.Increment(); // Todo - move back to main? Wherever the other menu stuff is
+            // if(encoder_value > encoder_value_limit) {
+            //     encoder_value = 0;
+            // }
+            // if(encoder_value < 0) {
+            //     encoder_value = encoder_value_limit;
+            // }
         }
 
-        UpdateMenu();
+        // UpdateMenu();
 
         encoder.Debounce();
 
@@ -139,12 +139,12 @@ void Terrarium::InitDisplay()
     display.Init(disp_cfg);
     display.Fill(false);
     display.SetCursor(64, 32);
-    daisy::Rectangle bounds = display.GetBounds();
+    display_bounds = display.GetBounds();
 
     char welcome_message[128];
     sprintf(welcome_message, "Hello :)");
 
-    display.WriteStringAligned(welcome_message, Font_11x18, bounds, daisy::Alignment::centered, true);
+    display.WriteStringAligned(welcome_message, Font_11x18, display_bounds, daisy::Alignment::centered, true);
     display.Update();
     System::Delay(500);
 }
