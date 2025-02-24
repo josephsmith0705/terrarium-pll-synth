@@ -1,185 +1,104 @@
-#include <algorithm>
-#include <cmath>
+#include "daisy_seed.h"
+#include <cmath> // For M_PI
 
-#include <daisy_seed.h>
-#include <q/fx/edge.hpp>
+using namespace daisy;
 
+DaisySeed hw;
 
-#include <util/Terrarium.h>
-#include <util/PLL.h>
+// PLL parameters
+static constexpr float DEFAULT_FREQ = 50.0f;    // Default frequency (Hz) - start at 500
+static constexpr float P_GAIN_BASE = 0.00001f;    // Base proportional gain for PLL adjustment - default 0.0001f. 0.1f has a weird, FM-sounding effect. 0.001f is fast vibrato.
+static constexpr float PHASE_WRAP = 1.0f;        // Phase accumulator wraps at 1.0f. Bigger is slower rate? 10 is way too slow.
 
-#include <stdio.h>
-#include <string.h>
+// Vibrato control parameters
+float vibrato_rate = 5.0f;   // Vibrato rate in Hz
+float vibrato_depth = 0.01f; // Vibrato depth as a fraction of the frequency
+float vibrato_phase = 0.0f;
 
-namespace q = cycfi::q;
-using namespace q::literals;
+// PLL state variables
+float phase_accum = 0.0f;
+float freq = DEFAULT_FREQ;
+float a_leads_b = 0.0f;
+float a_lags_b = 0.0f;
+bool prev_sample_positive = false;
 
-Terrarium terrarium;
-PLL pll;
-
-bool enable_effect = true;
-float frequency = 0;
-
-bool glitch_switch = false; // Map to switch
-bool sub_osc_source = false; // Map to switch - feed osc into sub osc for glitchiness
-bool vibrato_switch = false; // Map to switch
-
-float lfo_value = 1;
-bool lfo_rising = false;
-float lfo_depth_multiplier = 150;
-float lfo_rate_multiplier = 50; // Todo - make a multiple of rate. 15 is slow, 50 is nice. 150 seems to be slow again
-
-int effect_level = 5;
-
-struct Page
+/**
+ * @brief Detects positive zero-crossing
+ * @param current_sample Current input sample
+ * @param prev_positive Previous sample sign state
+ * @return True if a positive zero-crossing is detected
+ */
+bool pos_edge_detect(float current_sample, bool &prev_positive)
 {
-    std::string name;
-    int* value;
-};
-
-std::vector<Page> pages;
-
-float processLfo()
-{
-    if (lfo_value >= 2) {
-        lfo_rising = false;
-    } else if (lfo_value <= 1) {
-        lfo_rising = true;
-    }
-
-    if (lfo_rising) {
-        lfo_value += 0.00001 * lfo_rate_multiplier;
-    } else {
-        lfo_value -= 0.00001 * lfo_rate_multiplier;
-    }
-
-    return lfo_value * lfo_depth_multiplier;
+    bool current_positive = (current_sample >= 0.0f);
+    bool edge_detected = (!prev_positive && current_positive);
+    prev_positive = current_positive;
+    return edge_detected;
 }
 
+/**
+ * @brief Main PLL processing loop per audio block with improved vibrato control
+ */
 void processAudioBlock(
     daisy::AudioHandle::InputBuffer in,
     daisy::AudioHandle::OutputBuffer out,
     size_t size)
 {
-    pll.Init(terrarium.seed.AudioSampleRate());
+    float sample_rate = hw.AudioSampleRate();
 
     for (size_t i = 0; i < size; ++i)
     {
-        const float dry_signal = in[0][i];
+        float sample = in[0][i];
 
-        float mix = pll.Process(dry_signal) * effect_level * 0.1;
+        // Phase detector: detect zero-crossings
+        bool a_pos_edge = pos_edge_detect(sample, prev_sample_positive);
+        bool b_pos_edge = (phase_accum < 0.5f && (phase_accum + freq / sample_rate) >= 0.5f);
 
-        out[0][i] = enable_effect ? mix : dry_signal;
-        out[1][i] = 0;
+        // Bang-bang phase detector logic
+        bool reset = a_leads_b && a_lags_b;
+        a_leads_b = reset ? 0.0f : (a_pos_edge ? 1.0f : a_leads_b);
+        a_lags_b = reset ? 0.0f : (b_pos_edge ? 1.0f : a_lags_b);
+
+        float phase_error = a_leads_b - a_lags_b;
+
+        // Dynamic proportional gain scaling based on vibrato depth
+        float dynamic_gain = P_GAIN_BASE * (1.0f - vibrato_depth);
+
+        // Frequency adjustment based on phase error
+        freq += dynamic_gain * phase_error * freq;
+        if (freq < 1.0f)
+            freq = 1.0f;  // Prevent negative/zero frequency
+
+        // Vibrato effect calculation (reduced influence when depth is low)
+        vibrato_phase += vibrato_rate / sample_rate;
+        if (vibrato_phase >= 1.0f)
+            vibrato_phase -= 1.0f;
+
+        float vibrato_modulation = 1.0f + vibrato_depth * sinf(2.0f * M_PI * vibrato_phase);
+
+        // Phase accumulation for square wave generation
+        phase_accum += (freq * vibrato_modulation) / sample_rate;
+        if (phase_accum >= PHASE_WRAP)
+            phase_accum -= PHASE_WRAP;
+
+        // Output square wave: 1.0f for first half, -1.0f for second half
+        out[0][i] = (phase_accum < 0.5f) ? 1.0f : -1.0f;
     }
 }
 
+/**
+ * @brief Main entry point
+ */
 int main()
 {
-    terrarium.Init(false, true, true);
-    terrarium.seed.StartAudio(processAudioBlock);
+    hw.Configure();
+    hw.Init();
 
-    TerrariumLed& led_enable = terrarium.leds[0];
+    // Optionally adjust vibrato parameters here
+    // vibrato_rate = 500.0f;   // Hz
+    // vibrato_depth = 0.0005f; // Fraction of the frequency (reduced for tighter lock)
 
-    daisy::Switch& stomp_bypass = terrarium.stomps[0];
+    hw.StartAudio(processAudioBlock);
 
-    // daisy::AnalogControl& knob_dry = terrarium.knobs[0];
-
-    char page_value_buffer[128];
-    std::string page_name;
-    int page_value;
-    int selected_page;
-    bool selected = false;
-    pll.osc_frequency_multiplier = 2;
-    pll.sub_frequency_multiplier = 2;
-    int y = 0;
-
-    pages = {
-        {"Fuzz", &pll.fuzz_level},
-        {"Sub", &pll.sub_level},
-        {"Osc", &pll.osc_level},
-        {"Sub Freq", &pll.sub_frequency_multiplier},
-        {"Osc Freq", &pll.osc_frequency_multiplier},
-        {"Rate", &pll.tracking_scale_factor},
-        {"Release", &pll.tracking_attack_release_ratio},
-        {"Level", &effect_level},
-    };
-
-    terrarium.Loop(25, [&](){
-        pll.trigger_ratio = 0.5;
-
-        if (stomp_bypass.RisingEdge())
-        {
-            enable_effect = !enable_effect;
-        }
-
-        led_enable.Set(enable_effect ? 0.5 : 0);
-
-        // Todo - move to function DrawSine
-        // float y;
-        // float prevx;
-        // float prevy;
-
-        // terrarium.display.Fill(false);
-
-        // // Todo - Move oscilliscope to function
-        // for(int x = 0; x <= 128; x++) { 
-
-        //     int amplitude = 64;
-        //     y = abs((amplitude / 2) * (sin((x - (3 * M_PI / 2)) * (pll.frequency * 0.005)) - 1));
-
-        //     if(pll.frequency != 0) {
-        //         if(x == 0) {
-        //             terrarium.display.DrawPixel(x, y, true);
-        //         } else {
-        //             terrarium.display.DrawLine(prevx, prevy, x, y, true);
-        //         }
-
-        //         for(int under_y=128; under_y>=y; under_y--) {
-        //             terrarium.display.DrawPixel(x, under_y, true);
-        //         }
-
-        //         prevx = x;
-        //         prevy = y;
-        //     }
-        // }
-
-        // terrarium.display.DrawLine(0, y-1, 128, y-1, false);
-
-        // Todo - move to function DrawSelect
-        terrarium.display.Fill(selected);
-        terrarium.display.DrawLine(0, y, 128, y, !selected);
-        y++;
-        if(y > 64) {
-            y = 0;
-        }
-
-        if(terrarium.encoder.Pressed()) {
-            selected = !selected;
-            if (selected) {
-                selected_page = terrarium.encoder_value;
-            }
-        }
-
-        if(terrarium.encoder_value >= (signed)pages.size()) {
-            terrarium.encoder_value = 0;
-        } else if (terrarium.encoder_value < 0) {
-            terrarium.encoder_value = pages.size() - 1;
-        }
-
-        // Todo - move to terrarium UpdateMenu
-        if(selected) { // Use encoder value to change param value
-            page_name = pages[selected_page].name;
-            *pages[selected_page].value += terrarium.encoder.Increment();
-            page_value = *pages[selected_page].value;
-        } else { // Use encoder to change page
-            page_name = pages[terrarium.encoder_value].name;
-            page_value = *pages[terrarium.encoder_value].value;
-        }
-
-        sprintf(page_value_buffer, "%d", page_value);
-
-        terrarium.display.WriteStringAligned(page_name.c_str(), Font_7x10, terrarium.display_bounds, daisy::Alignment::topCentered, true);
-        terrarium.display.WriteStringAligned(page_value_buffer, Font_7x10, terrarium.display_bounds, daisy::Alignment::centered, true);
-    });
+    while (1) { /* Infinite loop */ }
 }
