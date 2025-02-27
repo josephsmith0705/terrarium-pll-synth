@@ -1,19 +1,28 @@
 #include "daisy_seed.h"
+#include <util/Fuzz.h>
+#include <util/Mapping.h>
+#include <util/LinearRamp.h>
+#include <q/fx/envelope.hpp>
+#include <q/fx/noise_gate.hpp>
+#include <q/fx/lowpass.hpp>
+#include <q/support/literals.hpp>
+#include <per/sai.h>
 #include <cmath> // For M_PI
 
-using namespace daisy;
 
-DaisySeed hw;
+namespace q = cycfi::q;
+using namespace q::literals;
+
+daisy::DaisySeed hw;
+Fuzz fuzz;
 
 // PLL parameters
-static constexpr float DEFAULT_FREQ = 50.0f;    // Default frequency (Hz) - start at 500
-static constexpr float P_GAIN_BASE = 0.00001f;    // Base proportional gain for PLL adjustment - default 0.0001f. 0.1f has a weird, FM-sounding effect. 0.001f is fast vibrato.
-static constexpr float PHASE_WRAP = 1.0f;        // Phase accumulator wraps at 1.0f. Bigger is slower rate? 10 is way too slow.
-
-// Vibrato control parameters
-float vibrato_rate = 5.0f;   // Vibrato rate in Hz
-float vibrato_depth = 0.01f; // Vibrato depth as a fraction of the frequency
-float vibrato_phase = 0.0f;
+static constexpr float DEFAULT_FREQ = 0.0f;     // Default frequency (Hz)
+static constexpr float PHASE_ERROR_GAIN = 0.01f;   // Base proportional gain for PLL adjustment. Basically vibrato depth. 0.001f (REALLY slow) - 0.05f (nice enough)
+static constexpr float PHASE_ERROR_RAMP = 3.0f;
+static constexpr float PHASE_WRAP = 1.0f;       // Phase accumulator wraps at 1.0f
+static constexpr float MAX_FREQ = 10000.0f;     // Emergency! Something went wrong and now the frequency keeps getting higher!
+static constexpr float LOWPASS_FREQ = 1000.0f;
 
 // PLL state variables
 float phase_accum = 0.0f;
@@ -21,12 +30,12 @@ float freq = DEFAULT_FREQ;
 float a_leads_b = 0.0f;
 float a_lags_b = 0.0f;
 bool prev_sample_positive = false;
+bool gate = false;
+bool zero_frequency = true;
+q::noise_gate noise_gate{-90_dB};
 
 /**
  * @brief Detects positive zero-crossing
- * @param current_sample Current input sample
- * @param prev_positive Previous sample sign state
- * @return True if a positive zero-crossing is detected
  */
 bool pos_edge_detect(float current_sample, bool &prev_positive)
 {
@@ -37,7 +46,7 @@ bool pos_edge_detect(float current_sample, bool &prev_positive)
 }
 
 /**
- * @brief Main PLL processing loop per audio block with improved vibrato control
+ * @brief Main PLL processing loop
  */
 void processAudioBlock(
     daisy::AudioHandle::InputBuffer in,
@@ -48,10 +57,20 @@ void processAudioBlock(
 
     for (size_t i = 0; i < size; ++i)
     {
+        auto env = q::peak_envelope_follower{ 1_s, sample_rate };
+        q::one_pole_lowpass low_pass(LOWPASS_FREQ, sample_rate);
+
+        // Todo - noise gate
+        bool osc_only = true;
         float sample = in[0][i];
+        auto envelope = env(std::abs(sample));
+        gate = noise_gate(envelope);
+        sample = low_pass(sample);
+
+        float fuzzed_signal = fuzz.Process(sample, 0.005);
 
         // Phase detector: detect zero-crossings
-        bool a_pos_edge = pos_edge_detect(sample, prev_sample_positive);
+        bool a_pos_edge = gate ? pos_edge_detect(sample, prev_sample_positive) : false;
         bool b_pos_edge = (phase_accum < 0.5f && (phase_accum + freq / sample_rate) >= 0.5f);
 
         // Bang-bang phase detector logic
@@ -60,29 +79,26 @@ void processAudioBlock(
         a_lags_b = reset ? 0.0f : (b_pos_edge ? 1.0f : a_lags_b);
 
         float phase_error = a_leads_b - a_lags_b;
-
-        // Dynamic proportional gain scaling based on vibrato depth
-        float dynamic_gain = P_GAIN_BASE * (1.0f - vibrato_depth);
+        // Todo - lowpass filter phase_error
 
         // Frequency adjustment based on phase error
-        freq += dynamic_gain * phase_error * freq;
-        if (freq < 1.0f)
-            freq = 1.0f;  // Prevent negative/zero frequency
-
-        // Vibrato effect calculation (reduced influence when depth is low)
-        vibrato_phase += vibrato_rate / sample_rate;
-        if (vibrato_phase >= 1.0f)
-            vibrato_phase -= 1.0f;
-
-        float vibrato_modulation = 1.0f + vibrato_depth * sinf(2.0f * M_PI * vibrato_phase);
-
+        freq += PHASE_ERROR_GAIN * phase_error;
+        if (freq <= 0.0f || freq > MAX_FREQ) {
+            freq = 0.0f;  // Prevent negative frequency
+            zero_frequency = true;
+        } else {
+            zero_frequency = false;
+        }
+            
         // Phase accumulation for square wave generation
-        phase_accum += (freq * vibrato_modulation) / sample_rate;
+        phase_accum += freq / sample_rate;
         if (phase_accum >= PHASE_WRAP)
             phase_accum -= PHASE_WRAP;
 
-        // Output square wave: 1.0f for first half, -1.0f for second half
-        out[0][i] = (phase_accum < 0.5f) ? 1.0f : -1.0f;
+        float osc_signal = (phase_accum < 0.5f) ? 1.0f : -1.0f;
+        float mix = osc_only ? osc_signal :  (fuzzed_signal / osc_signal);
+
+        out[0][i] = mix;
     }
 }
 
@@ -93,10 +109,8 @@ int main()
 {
     hw.Configure();
     hw.Init();
-
-    // Optionally adjust vibrato parameters here
-    // vibrato_rate = 500.0f;   // Hz
-    // vibrato_depth = 0.0005f; // Fraction of the frequency (reduced for tighter lock)
+    hw.SetAudioBlockSize(2);
+    hw.SetAudioSampleRate(daisy::SaiHandle::Config::SampleRate::SAI_48KHZ);
 
     hw.StartAudio(processAudioBlock);
 
