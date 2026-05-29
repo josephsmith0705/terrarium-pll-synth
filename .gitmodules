@@ -7,3 +7,6 @@
 [submodule "lib/gcem"]
 	path = lib/gcem
 	url = https://github.com/kthohr/gcem.git
+[submodule "lib/daisysp"]
+	path = lib/daisysp
+	url = https://github.com/electro-smith/daisysp.git

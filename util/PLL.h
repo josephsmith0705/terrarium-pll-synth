@@ -1,146 +1,272 @@
-#include <stdio.h>
-#include <util/Fuzz.h>
-#include <util/LinearRamp.h>
-#include <util/Mapping.h>
-#include <util/SvFilter.h>
-#include <util/WaveSynth.h>
+#pragma once
+
+#include <algorithm>
+#include <cmath>
+
 #include <q/fx/envelope.hpp>
 #include <q/fx/noise_gate.hpp>
 #include <q/support/literals.hpp>
-#include <q/support/pitch_names.hpp>
-#include <q/synth/sin_osc.hpp>
-#include <q/pitch/pitch_detector.hpp>
+
+#include <util/Fuzz.h>
+#include <util/LinearRamp.h>
+#include <util/Mapping.h>
+#include <util/NoiseSynth.h>
+#include <util/SvFilter.h>
+#include <util/WaveSynth.h>
 
 namespace q = cycfi::q;
 using namespace q::literals;
 
-static q::phase_iterator phase;
-static q::phase_iterator sub_phase;
-static WaveSynth wave_synth;
-static WaveSynth sub_wave_synth;
-static SvFilter band_pass;
-
 class PLL
 {
-    public:
-        inline void Init(float sr);
-        inline float Process(float dry_signal);
-        int fuzz_level = 5, sub_level = 5, osc_level = 5;
-        // float rate = 0.1; // Map to pot 5 - 0.9 is nice, but a bit slow! <0.5 might be too slow
-        int tracking_scale_factor = 1, tracking_attack_release_ratio = 1; // bigger = longer divebombs. 2-3 is reasonable. 5 is big!
-        int osc_frequency_multiplier = 1, sub_frequency_multiplier = 1; 
-        float trigger_ratio;
-        float frequency;
-
-    private:
-        Fuzz fuzz;
-        float sample_rate;
-        bool sub_osc_source = false;
-        static constexpr q::frequency min_freq = q::pitch_names::Ds[1];
-        static constexpr q::frequency max_freq = q::pitch_names::F[7];
-        static constexpr q::decibel hysteresis = -35_dB;
-        inline float CreateGate(float dry_signal);
-        inline void UpdateOscillatorFrequency(float target_frequency, bool dry_signal_under_threshold);
-        inline float GenerateOscVoice(float dry_signal, float frequency, bool gate);
-        inline float GenerateSubVoice(float fuzz_voice, float sub_frequency, float envelope);
-};
-
-void PLL::Init(float sr) {
-    wave_synth.setShape(1);
-    sub_wave_synth.setShape(3);
-    sample_rate = sr;
-}
-
-float PLL::CreateGate(float dry_signal) {
-    static q::peak_envelope_follower envelope_follower(10_ms, sample_rate);
-    static q::noise_gate gate(-120_dB);
-    static LinearRamp gate_ramp(0, 0.008);
-
-    constexpr LogMapping trigger_mapping{0.0001, 0.05, 0.4};
-    const float trigger = trigger_mapping(trigger_ratio);
-    gate.onset_threshold(trigger);
-    gate.release_threshold(q::lin_to_db(trigger) - 12_dB);
-
-    const float dry_envelope = envelope_follower(std::abs(dry_signal));
-    const bool gate_state = gate(dry_envelope);
-    return gate_ramp(gate_state ? 1 : 0);
-}
-
-void PLL::UpdateOscillatorFrequency(
-    float target_frequency,
-    bool dry_signal_under_threshold
-) {
-    // if (vibrato_switch) {
-    //     pd_frequency += processLfo(); // Todo - make this react to frequency. Higher note = higher rate
-    // }
-
-    if (!dry_signal_under_threshold)
+public:
+    struct Params
     {
-        frequency += ((target_frequency - frequency) / (tracking_scale_factor * 1000));
+        float master_level = 1.0f;
+        float fuzz_level = 0.5f;
+        float osc_level = 0.8f;
+        float sub_level = 0.6f;
+        float trigger_ratio = 0.4f;
+        float wave_shape = 1.0f; // 0..3
+        float pll_kp_hz = 180.0f;
+        float pll_ki_hz = 0.25f;
+        float pll_error_filter_alpha = 0.0035f;
+        float pll_integrator_limit_hz = 300.0f;
+        bool gate_enabled = true;
+        bool noise_mode = false;
+        bool envelope_follow = true;
+        bool sub_enabled = true;
+        bool deep_sub_mode = false;
+        bool raw_osc_only = false;
+    };
 
-    } else {
-        frequency -= (frequency / (tracking_scale_factor * 1000 * tracking_attack_release_ratio));
+    void Init(float sample_rate_hz)
+    {
+        sample_rate = sample_rate_hz;
+        gate_envelope = 0.0f;
+        vco_phase = 0.0f;
+        vco_frequency = free_run_frequency_hz;
+        pfd_input_latch = false;
+        pfd_vco_latch = false;
+        filtered_phase_error = 0.0f;
+        pll_integrator = 0.0f;
+
+        envelope_follower = q::peak_envelope_follower{10_ms, sample_rate};
+        gate = q::noise_gate{-120_dB};
+        gate_ramp = LinearRamp{0.0f, 0.008f};
+
+        wave_synth.setShape(1.0f);
+        sub_wave_synth.setShape(2.2f);
     }
-}
 
-float PLL::GenerateOscVoice(float dry_signal, float osc_frequency, bool gate) {
-    UpdateOscillatorFrequency(osc_frequency, !gate);
+    float Process(float dry_signal)
+    {
+        const float dry_envelope = envelope_follower(std::abs(dry_signal));
+        ConfigureGate(params.trigger_ratio);
 
-    phase.set((frequency), sample_rate);
-    const float osc_signal = wave_synth.compensated(phase); // Todo change to const
+        const bool gate_state = params.gate_enabled ? gate(dry_envelope) : true;
+        gate_envelope = gate_ramp(gate_state ? 1.0f : 0.0f);
 
-    phase++;
+        const bool input_edge = DetectInputRisingEdge(dry_signal, gate_state);
+        const bool vco_edge = DetectVcoRisingEdge();
+        UpdatePll(input_edge, vco_edge, gate_state);
 
-    if(!gate) {
-        dry_signal = 1;
+        wave_synth.setShape(params.wave_shape);
+        const float osc_signal = GenerateMainOscillator();
+        const float osc_voice = osc_signal;
+
+        const float envelope = params.envelope_follow ? dry_envelope : 1.0f;
+        const float gated = envelope * gate_envelope;
+
+        if (params.raw_osc_only)
+        {
+            // Direct VCO monitor mode: bypass gate/envelope shaping.
+            const float wet = (osc_voice * params.osc_level) * params.master_level;
+            return wet;
+        }
+
+        const float fuzz_threshold = fuzz_threshold_mapping(1.0f - params.trigger_ratio);
+        float fuzz_voice = fuzz.Process(dry_signal, fuzz_threshold);
+        fuzz_voice = std::clamp(fuzz_voice, -1.0f, 1.0f);
+
+        float sub_voice = 0.0f;
+        if (params.sub_enabled)
+        {
+            const float sub_ratio = params.deep_sub_mode ? 0.25f : 0.5f;
+            const float sub = GenerateSubOscillator(sub_ratio);
+            sub_voice = sub * fuzz_voice;
+        }
+
+        const float mix =
+            (fuzz_voice * params.fuzz_level) +
+            (osc_voice * params.osc_level) +
+            (sub_voice * params.sub_level);
+        const float wet = mix * gated * params.master_level;
+
+        return wet;
     }
 
-    band_pass.config(frequency, sample_rate, 30); 
-    band_pass.update(dry_signal);
-    float filtered_fuzz = fuzz.Process(dry_signal, 0.05) / 3; 
+    void SetParams(const Params& p)
+    {
+        params = p;
+        params.master_level = std::clamp(params.master_level, 0.0f, 2.0f);
+        params.fuzz_level = std::clamp(params.fuzz_level, 0.0f, 2.0f);
+        params.osc_level = std::clamp(params.osc_level, 0.0f, 2.0f);
+        params.sub_level = std::clamp(params.sub_level, 0.0f, 2.0f);
+        params.trigger_ratio = std::clamp(params.trigger_ratio, 0.0f, 1.0f);
+        params.wave_shape = std::clamp(params.wave_shape, 0.0f, 3.0f);
+        params.pll_kp_hz = std::clamp(params.pll_kp_hz, 20.0f, 800.0f);
+        params.pll_ki_hz = std::clamp(params.pll_ki_hz, 0.0f, 3.0f);
+        params.pll_error_filter_alpha = std::clamp(params.pll_error_filter_alpha, 0.0005f, 0.05f);
+        params.pll_integrator_limit_hz = std::clamp(params.pll_integrator_limit_hz, 20.0f, 800.0f);
+    }
 
+private:
+    void ConfigureGate(float trigger_ratio)
+    {
+        const float trigger = trigger_mapping(trigger_ratio);
+        gate.onset_threshold(trigger);
+        gate.release_threshold(q::lin_to_db(trigger) - 12_dB);
+    }
 
+    bool DetectInputRisingEdge(float dry_signal, bool gate_open)
+    {
+        if (!gate_open)
+        {
+            input_high = false;
+            return false;
+        }
 
-    float osc_voice = ((((filtered_fuzz * osc_signal) + (filtered_fuzz / osc_signal))) * 10) + (osc_signal * 8);
+        // Light conditioning before edge extraction reduces chatter on guitar input.
+        input_hp = (dry_signal - input_prev_sample) + (input_hp * 0.995f);
+        input_prev_sample = dry_signal;
 
-    return osc_voice;
-}
+        const float threshold = edge_threshold_mapping(params.trigger_ratio);
+        bool rising_edge = false;
 
-float PLL::GenerateSubVoice(float fuzz_voice, float sub_frequency, float envelope) {
-    sub_phase.set(sub_frequency, sample_rate);
+        if (!input_high && input_hp > threshold)
+        {
+            input_high = true;
+            rising_edge = true;
+        }
+        else if (input_high && input_hp < -threshold)
+        {
+            input_high = false;
+        }
 
-    float sub_signal = sub_wave_synth.compensated(sub_phase);
-    float sub_voice;
+        return rising_edge;
+    }
 
-    // if (sub_osc_source) {
-    //     sub_voice = GenerateOscVoice(sub_signal, sub_frequency, envelope != 0);
-    // } else {
-        sub_voice = (sub_signal * fuzz_voice) + (fuzz_voice / sub_signal) + (sub_signal * 10);
-    // }
+    bool DetectVcoRisingEdge()
+    {
+        const float phase_step = vco_frequency / sample_rate;
+        const float next_phase = vco_phase + phase_step;
+        const bool edge = (vco_phase < 0.5f) && (next_phase >= 0.5f);
+        return edge;
+    }
 
-    sub_phase++;
-    return sub_signal * fuzz_voice * envelope;
-    return sub_voice * envelope;
-}
+    void UpdatePll(bool input_edge, bool vco_edge, bool gate_open)
+    {
+        if (!gate_open)
+        {
+            pfd_input_latch = false;
+            pfd_vco_latch = false;
+            filtered_phase_error *= 0.99f;
+            pll_integrator *= 0.998f;
+        }
 
-float PLL::Process(float dry_signal) {
-    static q::pitch_detector pd(min_freq, max_freq, sample_rate, hysteresis);
+        if (input_edge)
+        {
+            pfd_input_latch = true;
+        }
 
-    float gate_envelope = CreateGate(dry_signal);
+        if (vco_edge)
+        {
+            pfd_vco_latch = true;
+        }
 
-    float fuzz_voice = fuzz.Process(dry_signal, 0.005) * 0.5;
+        if (pfd_input_latch && pfd_vco_latch)
+        {
+            pfd_input_latch = false;
+            pfd_vco_latch = false;
+        }
 
-    pd(dry_signal);
-    
-    float osc_frequency = pd.get_frequency() * osc_frequency_multiplier;
-    float osc_voice = GenerateOscVoice(dry_signal, osc_frequency, gate_envelope != 0);
+        const float raw_phase_error =
+            (pfd_input_latch ? 1.0f : 0.0f) - (pfd_vco_latch ? 1.0f : 0.0f);
 
-    // return osc_voice + (fuzz_voice * 0);
+        filtered_phase_error += params.pll_error_filter_alpha * (raw_phase_error - filtered_phase_error);
+        pll_integrator += (filtered_phase_error * params.pll_ki_hz);
+        pll_integrator = std::clamp(
+            pll_integrator,
+            -params.pll_integrator_limit_hz,
+            params.pll_integrator_limit_hz);
 
-    float sub_fuzz = fuzz_voice;
-    float sub_frequency = pd.get_frequency() / sub_frequency_multiplier;
-    float sub_voice = GenerateSubVoice(sub_fuzz, sub_frequency, gate_envelope);
-    
-    float mix = (fuzz_voice * fuzz_level * 0.1) + (osc_voice * osc_level * 0.1) + (sub_voice * sub_level * 0.1);
-    return mix;
-}
+        const float target_frequency =
+            free_run_frequency_hz + (filtered_phase_error * params.pll_kp_hz) + pll_integrator;
+
+        const float settle = gate_open ? 0.01f : 0.002f;
+        vco_frequency += (target_frequency - vco_frequency) * settle;
+        vco_frequency = std::clamp(vco_frequency, min_frequency_hz, max_frequency_hz);
+    }
+
+    float GenerateMainOscillator()
+    {
+        phase.set(vco_frequency, sample_rate);
+        const float signal = wave_synth.compensated(phase);
+        phase++;
+        AdvanceVco();
+        return signal;
+    }
+
+    float GenerateSubOscillator(float ratio)
+    {
+        const float sub_frequency = std::max(min_frequency_hz, vco_frequency * ratio);
+        sub_phase.set(sub_frequency, sample_rate);
+        const float sub = sub_wave_synth.compensated(sub_phase);
+        sub_phase++;
+        return sub;
+    }
+
+    void AdvanceVco()
+    {
+        vco_phase += vco_frequency / sample_rate;
+        if (vco_phase >= 1.0f)
+        {
+            vco_phase -= 1.0f;
+        }
+    }
+
+    static constexpr float min_frequency_hz = 30.0f;
+    static constexpr float max_frequency_hz = 2400.0f;
+    static constexpr float free_run_frequency_hz = 110.0f;
+
+    static constexpr LogMapping trigger_mapping{0.0001f, 0.05f, 0.4f};
+    static constexpr LogMapping fuzz_threshold_mapping{0.0008f, 0.08f};
+    static constexpr LinearMapping noise_duration_mapping{1.0f, 120.0f};
+    static constexpr LogMapping edge_threshold_mapping{0.001f, 0.06f};
+
+    Params params{};
+    float sample_rate = 48000.0f;
+    float gate_envelope = 0.0f;
+    float vco_phase = 0.0f;
+    float vco_frequency = free_run_frequency_hz;
+    float input_prev_sample = 0.0f;
+    float input_hp = 0.0f;
+    bool input_high = false;
+
+    bool pfd_input_latch = false;
+    bool pfd_vco_latch = false;
+    float filtered_phase_error = 0.0f;
+    float pll_integrator = 0.0f;
+
+    Fuzz fuzz;
+    NoiseSynth noise_synth;
+    WaveSynth wave_synth;
+    WaveSynth sub_wave_synth;
+
+    q::peak_envelope_follower envelope_follower{10_ms, sample_rate};
+    q::noise_gate gate{-120_dB};
+    LinearRamp gate_ramp{0.0f, 0.008f};
+    q::phase_iterator phase;
+    q::phase_iterator sub_phase;
+};

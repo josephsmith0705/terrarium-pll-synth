@@ -3,15 +3,18 @@
 void Terrarium::Init(bool boost, bool oled, bool encoder)
 {
     seed.Init(boost);
+    display_enabled = oled;
+    encoder_enabled = encoder;
+
     InitKnobs();
     InitToggles();
     InitStomps();
     InitLeds();
 
-    if(oled) {
+    if(display_enabled) {
         InitDisplay();
     }
-    if(encoder) {
+    if(encoder_enabled) {
         InitEncoder();
     }
 }
@@ -38,21 +41,19 @@ void Terrarium::Loop(float frequency, std::function<void()> callback)
             stomp.Debounce();
         }
 
-        if(encoder.Increment() != 0) {
-            encoder_value += encoder.Increment(); // Todo - move back to main? Wherever the other menu stuff is
-            // if(encoder_value > encoder_value_limit) {
-            //     encoder_value = 0;
-            // }
-            // if(encoder_value < 0) {
-            //     encoder_value = encoder_value_limit;
-            // }
+        if(encoder_enabled) {
+            const int increment = encoder.Increment();
+            if(increment != 0) {
+                encoder_value += increment;
+            }
+
+            encoder.Debounce();
         }
 
-        // UpdateMenu();
-
-        encoder.Debounce();
-
-        display.Update();
+        if(display_enabled) {
+            // UpdateMenu();
+            display.Update();
+        }
 
         callback();
 

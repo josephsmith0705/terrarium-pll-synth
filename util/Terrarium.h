@@ -46,6 +46,9 @@ public:
     int encoder_value_limit = 2;
 
 private:
+    bool display_enabled = false;
+    bool encoder_enabled = false;
+
     void InitKnobs();
     void InitToggles();
     void InitStomps();

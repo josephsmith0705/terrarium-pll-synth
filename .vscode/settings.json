@@ -85,5 +85,8 @@
         "unordered_set": "cpp",
         "filesystem": "cpp",
         "__memory": "cpp"
+    },
+    "chat.tools.terminal.autoApprove": {
+        "cmake": true
     }
 }
