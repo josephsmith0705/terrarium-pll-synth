@@ -53,8 +53,10 @@ int main()
     pll.Init(terrarium.seed.AudioSampleRate());
 
     auto& knob_wave = terrarium.knobs[0];
+    auto& knob_glide = terrarium.knobs[1];
     auto& knob_stability = terrarium.knobs[2];
     auto& toggle_guitar_mode = terrarium.toggles[0];
+    auto& toggle_osc_source = terrarium.toggles[1];
     auto& stomp_effect = terrarium.stomps[0];
     auto& led_effect = terrarium.leds[0];
 
@@ -75,6 +77,8 @@ int main()
     params.sub_enabled = false;
     params.deep_sub_mode = false;
     params.raw_osc_only = false;
+    params.use_vco_phase_output = true;
+    params.glide_speed = 0.25f;
     pll.SetParams(params);
 
     terrarium.Loop(200, [&]() {
@@ -89,10 +93,18 @@ int main()
         params.gate_enabled = true;
         // Switch 1: ON = more guitar-like dynamics, OFF = smoother synth envelope.
         params.envelope_follow = toggle_guitar_mode.Pressed();
+        // Switch 2: ON = direct vco_phase, OFF = wave_synth signal.
+        params.use_vco_phase_output = toggle_osc_source.Pressed();
         params.wave_shape = wave_shape_mapping(knob_wave.Process());
+        const float glide_knob = knob_glide.Process();
+        // Compress glide control into upper half of the knob so 50% now
+        // matches the previous slowest setting and the rest sweeps faster.
+        const float glide_shifted = std::clamp((glide_knob - 0.5f) * 2.0f, 0.0f, 1.0f);
+        params.glide_speed = (glide_knob > 0.97f) ? 1.0f : std::pow(glide_shifted, 3.0f);
 
         // Active controls in simplified PLL mode:
         // - knob 1: wave shape (pulse -> square -> triangle -> saw)
+        // - knob 2: glide speed (0 slow -> 1 instant snap)
         // - knob 3: stability (PLL error filter alpha)
         // All other knobs intentionally inactive.
         params.pll_error_filter_alpha = CenteredStability(knob_stability.Process());
