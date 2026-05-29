@@ -55,8 +55,10 @@ int main()
     auto& knob_wave = terrarium.knobs[0];
     auto& knob_glide = terrarium.knobs[1];
     auto& knob_stability = terrarium.knobs[2];
-    auto& toggle_guitar_mode = terrarium.toggles[0];
-    auto& toggle_osc_source = terrarium.toggles[1];
+    auto& knob_sub_wave = terrarium.knobs[3];
+    auto& toggle_fuzz_on = terrarium.toggles[0];
+    auto& toggle_osc_on = terrarium.toggles[1];
+    auto& toggle_sub_on = terrarium.toggles[2];
     auto& stomp_effect = terrarium.stomps[0];
     auto& led_effect = terrarium.leds[0];
 
@@ -66,11 +68,12 @@ int main()
 
     // Temporary PLL tuning mode: only raw oscillator, no switches.
     params.master_level = 0.7f;
-    params.fuzz_level = 0.0f;
+    params.fuzz_level = 1.0f;
     params.osc_level = 1.0f;
-    params.sub_level = 0.0f;
+    params.sub_level = 1.0f;
     params.trigger_ratio = 0.3f;
     params.wave_shape = 1.0f;
+    params.sub_wave_shape = 1.0f;
     params.gate_enabled = true;
     params.noise_mode = false;
     params.envelope_follow = false;
@@ -91,11 +94,16 @@ int main()
         params.noise_mode = false;
         params.raw_osc_only = false;
         params.gate_enabled = true;
-        // Switch 1: ON = more guitar-like dynamics, OFF = smoother synth envelope.
-        params.envelope_follow = toggle_guitar_mode.Pressed();
-        // Switch 2: ON = direct vco_phase, OFF = wave_synth signal.
-        params.use_vco_phase_output = toggle_osc_source.Pressed();
+        params.envelope_follow = false;
+        // Switch 1: fuzz on/off.
+        params.fuzz_level = toggle_fuzz_on.Pressed() ? 1.0f : 0.0f;
+        // Switch 2: oscillator on/off.
+        params.osc_level = toggle_osc_on.Pressed() ? 1.0f : 0.0f;
+        // Switch 3: sub oscillator on/off.
+        params.sub_enabled = toggle_sub_on.Pressed();
+        params.sub_level = params.sub_enabled ? 1.0f : 0.0f;
         params.wave_shape = wave_shape_mapping(knob_wave.Process());
+        params.sub_wave_shape = wave_shape_mapping(knob_sub_wave.Process());
         const float glide_knob = knob_glide.Process();
         // Compress glide control into upper half of the knob so 50% now
         // matches the previous slowest setting and the rest sweeps faster.
@@ -106,7 +114,11 @@ int main()
         // - knob 1: wave shape (pulse -> square -> triangle -> saw)
         // - knob 2: glide speed (0 slow -> 1 instant snap)
         // - knob 3: stability (PLL error filter alpha)
-        // All other knobs intentionally inactive.
+        // - knob 4: sub oscillator wave shape
+        // Switches:
+        // - switch 1: fuzz on/off
+        // - switch 2: oscillator on/off
+        // - switch 3: sub oscillator on/off
         params.pll_error_filter_alpha = CenteredStability(knob_stability.Process());
 
         pll.SetParams(params);

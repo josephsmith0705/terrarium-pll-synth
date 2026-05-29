@@ -28,6 +28,7 @@ public:
         float sub_level = 0.6f;
         float trigger_ratio = 0.2f;
         float wave_shape = 1.0f; // 0..3
+        float sub_wave_shape = 1.0f; // 0..3
         float pll_kp_hz = 180.0f;
         float pll_ki_hz = 0.25f;
         float pll_error_filter_alpha = 0.0035f;
@@ -48,6 +49,7 @@ public:
         gate_envelope = 0.0f;
         vco_phase = 0.0f;
         output_phase = 0.0f;
+        sub_vco_phase = 0.0f;
         vco_frequency = free_run_frequency_hz;
         glide_frequency = free_run_frequency_hz;
         glide_target_frequency = free_run_frequency_hz;
@@ -80,6 +82,7 @@ public:
         wave_synth.setShape(params.wave_shape);
         const float osc_signal = GenerateMainOscillator();
         const float osc_voice = osc_signal;
+        sub_wave_synth.setShape(params.sub_wave_shape);
 
         const float envelope = params.envelope_follow ? dry_envelope : 1.0f;
         const float sustain = output_mute_ramp(glide_frequency > mute_frequency_hz ? 1.0f : 0.0f);
@@ -93,15 +96,14 @@ public:
         }
 
         const float fuzz_threshold = fuzz_threshold_mapping(1.0f - params.trigger_ratio);
-        float fuzz_voice = fuzz.Process(dry_signal, fuzz_threshold);
-        fuzz_voice = std::clamp(fuzz_voice, -1.0f, 1.0f);
+        const float fuzz_input = std::clamp(dry_signal * fuzz_drive, -1.0f, 1.0f);
+        float fuzz_voice = fuzz.Process(fuzz_input, fuzz_threshold * 0.5f);
+        fuzz_voice = std::clamp(fuzz_voice * fuzz_makeup_gain, -1.0f, 1.0f);
 
         float sub_voice = 0.0f;
         if (params.sub_enabled)
         {
-            const float sub_ratio = params.deep_sub_mode ? 0.25f : 0.5f;
-            const float sub = GenerateSubOscillator(sub_ratio);
-            sub_voice = sub * fuzz_voice;
+            sub_voice = GenerateSubOscillatorVoice();
         }
 
         const float mix =
@@ -122,6 +124,7 @@ public:
         params.sub_level = std::clamp(params.sub_level, 0.0f, 2.0f);
         params.trigger_ratio = std::clamp(params.trigger_ratio, 0.0f, 1.0f);
         params.wave_shape = std::clamp(params.wave_shape, 0.0f, 3.0f);
+        params.sub_wave_shape = std::clamp(params.sub_wave_shape, 0.0f, 3.0f);
         params.pll_kp_hz = std::clamp(params.pll_kp_hz, 20.0f, 800.0f);
         params.pll_ki_hz = std::clamp(params.pll_ki_hz, 0.0f, 3.0f);
         params.pll_error_filter_alpha = std::clamp(params.pll_error_filter_alpha, 0.0005f, 0.05f);
@@ -231,14 +234,10 @@ private:
         }
         else
         {
-            // Reject rapid PLL jitter before feeding the audible glide target.
-            const float max_step = std::lerp(
-                glide_target_max_step_hz_per_sample,
-                glide_target_fast_step_hz_per_sample,
-                params.glide_speed);
-            const float target_delta = target_source - glide_target_frequency;
-            const float limited_delta = std::clamp(target_delta, -max_step, max_step);
-            glide_target_frequency += limited_delta;
+            // Keep glide-target smoothing fixed so knob speed only affects glide time,
+            // not pitch stability.
+            glide_target_frequency +=
+                (target_source - glide_target_frequency) * glide_target_follow_slew;
         }
 
         glide_target_frequency = std::clamp(glide_target_frequency, 0.0f, max_frequency_hz);
@@ -256,6 +255,12 @@ private:
             // Portamento: glide the audible oscillator toward the filtered PLL target.
             const float slew = std::lerp(glide_slew_min, glide_slew_max, params.glide_speed);
             glide_frequency += (glide_target_frequency - glide_frequency) * slew;
+
+            // Avoid lingering micro-wobble near destination on slow settings.
+            if (std::abs(glide_target_frequency - glide_frequency) < glide_lock_deadband_hz)
+            {
+                glide_frequency = glide_target_frequency;
+            }
         }
 
         glide_frequency = std::clamp(glide_frequency, 0.0f, max_frequency_hz);
@@ -267,9 +272,20 @@ private:
         return params.use_vco_phase_output ? output_phase : signal;
     }
 
-    float GenerateSubOscillator(float ratio)
+    float GenerateSubOscillatorVoice()
     {
-        const float sub_frequency = std::max(min_frequency_hz, vco_frequency * ratio);
+        const float sub_frequency = std::clamp(vco_frequency * 0.5f, 0.0f, max_frequency_hz);
+
+        if (params.use_vco_phase_output)
+        {
+            sub_vco_phase += sub_frequency / sample_rate;
+            if (sub_vco_phase >= 1.0f)
+            {
+                sub_vco_phase -= 1.0f;
+            }
+            return sub_vco_phase;
+        }
+
         sub_phase.set(sub_frequency, sample_rate);
         const float sub = sub_wave_synth.compensated(sub_phase);
         sub_phase++;
@@ -305,6 +321,7 @@ private:
     float gate_envelope = 0.0f;
     float vco_phase = 0.0f;
     float output_phase = 0.0f;
+    float sub_vco_phase = 0.0f;
     float vco_frequency = free_run_frequency_hz;
     float glide_frequency = free_run_frequency_hz;
     float glide_target_frequency = free_run_frequency_hz;
@@ -317,11 +334,13 @@ private:
     float filtered_phase_error = 0.0f;
     float pll_integrator = 0.0f;
 
-    static constexpr float glide_slew_min = 0.0004f;
+    static constexpr float glide_slew_min = 0.0002f;
     static constexpr float glide_slew_max = 0.02f;
-    static constexpr float glide_target_max_step_hz_per_sample = 0.01f;
-    static constexpr float glide_target_fast_step_hz_per_sample = 0.25f;
+    static constexpr float glide_target_follow_slew = 0.015f;
+    static constexpr float glide_lock_deadband_hz = 0.35f;
     static constexpr float mute_frequency_hz = 0.7f;
+    static constexpr float fuzz_drive = 2.0f;
+    static constexpr float fuzz_makeup_gain = 1.35f;
 
     Fuzz fuzz;
     NoiseSynth noise_synth;

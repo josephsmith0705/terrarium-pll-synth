@@ -4,14 +4,13 @@ Firmware for a fuzzed PLL synth pedal on Daisy Seed + Terrarium hardware.
 
 ## Controls
 
-Switch 1 controls envelope tracking
-Switch 2 selects oscillator source (`vco_phase` vs `wave_synth`)
-Knob 1: wave shape
+Switch 1 enables/disables fuzz voice
+Switch 2 enables/disables osc voice 
+Switch 3 enables/disables sub osc voice 
 Knob 2: tracking speed
 Knob 3: stability (`pll_error_filter_alpha`)
 
-1. Left stomp: effect bypass toggle.
-3. LED 1: effect enabled.
+Left stomp: effect bypass toggle.
 
 ## Building
 
