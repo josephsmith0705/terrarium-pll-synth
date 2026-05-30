@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 
 #include <per/sai.h>
 
@@ -21,6 +22,84 @@ constexpr LinearMapping wave_shape_mapping{0.0f, 3.0f};
 constexpr LinearMapping fuzz_level_mapping{0.0f, 2.0f};
 constexpr LinearMapping master_level_mapping{0.0f, 1.5f};
 constexpr float final_output_trim = 0.2f;
+
+float CenteredStability(float knob_ratio);
+float QuantizedPitchMultiplier(float knob_ratio);
+float QuantizedSubIntervalMultiplier(float knob_ratio);
+
+struct ControlState
+{
+    std::array<float, 6> knobs{};
+    std::array<bool, 4> toggles{};
+};
+
+ControlState ReadControlState(
+    daisy::AnalogControl& knob_osc_multiplier,
+    daisy::AnalogControl& knob_fuzz_level,
+    daisy::AnalogControl& knob_glide,
+    daisy::AnalogControl& knob_sub_multiplier,
+    daisy::AnalogControl& knob_sub_level,
+    daisy::AnalogControl& knob_master_level,
+    daisy::Switch& toggle_fuzz_on,
+    daisy::Switch& toggle_osc_on,
+    daisy::Switch& toggle_sub_on,
+    daisy::Switch& toggle_osc_fx_bypass)
+{
+    ControlState state{};
+    state.knobs[0] = knob_osc_multiplier.Process();
+    state.knobs[1] = knob_fuzz_level.Process();
+    state.knobs[2] = knob_glide.Process();
+    state.knobs[3] = knob_sub_multiplier.Process();
+    state.knobs[4] = knob_sub_level.Process();
+    state.knobs[5] = knob_master_level.Process();
+
+    state.toggles[0] = toggle_fuzz_on.Pressed();
+    state.toggles[1] = toggle_osc_on.Pressed();
+    state.toggles[2] = toggle_sub_on.Pressed();
+    state.toggles[3] = toggle_osc_fx_bypass.Pressed();
+    return state;
+}
+
+void ApplyControlState(const ControlState& state, PLL::Params& params)
+{
+    params.trigger_ratio = 0.3f;
+    params.noise_mode = false;
+    params.raw_osc_only = false;
+    params.gate_enabled = true;
+    params.envelope_follow = false;
+
+    // Switch 1: fuzz on/off, knob 2 sets fuzz level.
+    params.fuzz_level = state.toggles[0]
+        ? fuzz_level_mapping(state.knobs[1])
+        : 0.0f;
+    // Switch 2: oscillator on/off.
+    params.osc_level = state.toggles[1] ? 0.5f : 0.0f;
+    // Switch 3: sub oscillator on/off.
+    params.sub_enabled = state.toggles[2];
+    params.sub_level = params.sub_enabled ? state.knobs[4] : 0.0f;
+    // Switch 4: osc-fx bypass (on = raw oscillator voice).
+    params.vibrato_mode = state.toggles[3];
+
+    // Knob 6 controls overall output level at the final output stage.
+    output_master_level = master_level_mapping(state.knobs[5]);
+    params.master_level = 1.0f;
+
+    // Wave shapes fixed to square.
+    params.wave_shape = 1.0f;
+    params.sub_wave_shape = 1.0f;
+
+    // Knob 1 and 4 are categorical pitch multiplier controls.
+    params.main_pitch_multiplier = QuantizedPitchMultiplier(state.knobs[0]);
+    params.sub_pitch_multiplier = QuantizedSubIntervalMultiplier(state.knobs[3]);
+
+    // Compress glide control into upper half of the knob so 50% now
+    // matches the previous slowest setting and the rest sweeps faster.
+    const float glide_shifted = std::clamp((state.knobs[2] - 0.5f) * 2.0f, 0.0f, 1.0f);
+    params.glide_speed = (state.knobs[2] > 0.97f) ? 1.0f : std::pow(glide_shifted, 3.0f);
+
+    // Stability fixed to midpoint (50%).
+    params.pll_error_filter_alpha = CenteredStability(0.5f);
+}
 
 float CenteredStability(float knob_ratio)
 {
@@ -109,7 +188,9 @@ int main()
     auto& toggle_sub_on = terrarium.toggles[2];
     auto& toggle_vibrato_mode = terrarium.toggles[3];
     auto& stomp_effect = terrarium.stomps[0];
+    auto& stomp_preset = terrarium.stomps[1];
     auto& led_effect = terrarium.leds[0];
+    auto& led_preset = terrarium.leds[1];
 
     terrarium.seed.SetAudioBlockSize(2);
 
@@ -136,42 +217,88 @@ int main()
     params.glide_speed = 0.25f;
     pll.SetParams(params);
 
+    ControlState saved_state{};
+    bool saved_state_valid = false;
+    ControlState pre_preset_state{};
+
+    bool preset_active = false;
+    bool preset_hold_latched = false;
+    bool preset_save_mode = false;
+    uint32_t preset_hold_samples = 0;
+    constexpr uint32_t long_press_samples = 200; // 1 second at 200 Hz loop.
+    constexpr uint32_t save_led_flash_ms = 160;
+
     terrarium.Loop(200, [&]() {
         if (stomp_effect.RisingEdge())
         {
             effect_enabled = !effect_enabled;
         }
 
-        params.trigger_ratio = 0.3f;
-        params.noise_mode = false;
-        params.raw_osc_only = false;
-        params.gate_enabled = true;
-        params.envelope_follow = false;
-        // Switch 1: fuzz on/off, knob 5 sets fuzz level.
-        params.fuzz_level = toggle_fuzz_on.Pressed()
-            ? fuzz_level_mapping(knob_fuzz_level.Process())
-            : 0.0f;
-        // Switch 2: oscillator on/off.
-        params.osc_level = toggle_osc_on.Pressed() ? 0.5f : 0.0f;
-        // Switch 3: sub oscillator on/off.
-        params.sub_enabled = toggle_sub_on.Pressed();
-        params.sub_level = params.sub_enabled ? knob_sub_level.Process() : 0.0f;
-        // Switch 4: osc-fx bypass (on = raw oscillator voice).
-        params.vibrato_mode = toggle_vibrato_mode.Pressed();
-        // Knob 6 controls overall output level at the final output stage.
-        output_master_level = master_level_mapping(knob_master_level.Process());
-        params.master_level = 1.0f;
-        // Wave shapes fixed to square.
-        params.wave_shape = 1.0f;
-        params.sub_wave_shape = 1.0f;
-        // Knob 1 and 4 are categorical pitch multiplier controls.
-        params.main_pitch_multiplier = QuantizedPitchMultiplier(knob_osc_multiplier.Process());
-        params.sub_pitch_multiplier = QuantizedSubIntervalMultiplier(knob_sub_multiplier.Process());
-        const float glide_knob = knob_glide.Process();
-        // Compress glide control into upper half of the knob so 50% now
-        // matches the previous slowest setting and the rest sweeps faster.
-        const float glide_shifted = std::clamp((glide_knob - 0.5f) * 2.0f, 0.0f, 1.0f);
-        params.glide_speed = (glide_knob > 0.97f) ? 1.0f : std::pow(glide_shifted, 3.0f);
+        const ControlState live_state = ReadControlState(
+            knob_osc_multiplier,
+            knob_fuzz_level,
+            knob_glide,
+            knob_sub_multiplier,
+            knob_sub_level,
+            knob_master_level,
+            toggle_fuzz_on,
+            toggle_osc_on,
+            toggle_sub_on,
+            toggle_vibrato_mode);
+
+        // Footswitch 2: long hold enters save mode and snapshots current state.
+        if (stomp_preset.RisingEdge())
+        {
+            preset_hold_samples = 0;
+            preset_hold_latched = false;
+        }
+
+        if (stomp_preset.Pressed())
+        {
+            ++preset_hold_samples;
+            if (!preset_hold_latched && preset_hold_samples >= long_press_samples)
+            {
+                preset_hold_latched = true;
+                preset_save_mode = true;
+                saved_state = live_state;
+                saved_state_valid = true;
+            }
+        }
+
+        if (stomp_preset.FallingEdge())
+        {
+            if (preset_save_mode)
+            {
+                // Releasing after a long hold exits save mode.
+                preset_save_mode = false;
+            }
+            else if (!preset_hold_latched)
+            {
+                // Short press: toggle preset recall.
+                if (preset_active)
+                {
+                    preset_active = false;
+                }
+                else
+                {
+                    pre_preset_state = live_state;
+                    if (!saved_state_valid)
+                    {
+                        // If nothing has been saved yet, initialize from current state.
+                        saved_state = live_state;
+                        saved_state_valid = true;
+                    }
+                    preset_active = true;
+                }
+            }
+
+            preset_hold_samples = 0;
+            preset_hold_latched = false;
+        }
+
+        const ControlState& active_state = preset_active ? saved_state : live_state;
+        (void)pre_preset_state;
+        ApplyControlState(active_state, params);
 
         // Active controls in simplified PLL mode:
         // - knob 1: main oscillator pitch multiplier (categorical)
@@ -185,11 +312,23 @@ int main()
         // - switch 2: oscillator on/off
         // - switch 3: sub oscillator on/off
         // - switch 4: osc-fx bypass (raw wave)
+        // Footswitch 2:
+        // - hold >1s: save current knob/switch state (LED2 flashes while held)
+        // - short press: toggle preset recall on/off
         // Stability fixed to midpoint (50%).
-        params.pll_error_filter_alpha = CenteredStability(0.5f);
 
         pll.SetParams(params);
 
         led_effect.Set(effect_enabled ? 1.0f : 0.0f);
+
+        if (preset_save_mode)
+        {
+            const bool flash_on = ((daisy::System::GetNow() / save_led_flash_ms) % 2) == 0;
+            led_preset.Set(flash_on ? 1.0f : 0.0f);
+        }
+        else
+        {
+            led_preset.Set(preset_active ? 1.0f : 0.0f);
+        }
     });
 }

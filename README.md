@@ -15,7 +15,8 @@ Knob 4: Sub-oscillator pitch
 Knob 5: Sub-oscillator level
 Knob 6: Master level
 
-Left stomp: effect bypass toggle.
+Left stomp: effect bypass toggle
+Right stomp: preset control: hold (until LED flashes) to store, press to recall
 
 ## Building
 
