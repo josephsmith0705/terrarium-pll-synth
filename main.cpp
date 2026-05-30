@@ -156,7 +156,7 @@ int main()
         // Switch 3: sub oscillator on/off.
         params.sub_enabled = toggle_sub_on.Pressed();
         params.sub_level = params.sub_enabled ? knob_sub_level.Process() : 0.0f;
-        // Switch 4: vibrato-mode PLL phase detector source.
+        // Switch 4: osc-fx bypass (on = raw oscillator voice).
         params.vibrato_mode = toggle_vibrato_mode.Pressed();
         // Knob 6 controls overall output level at the final output stage.
         output_master_level = master_level_mapping(knob_master_level.Process());
@@ -184,7 +184,7 @@ int main()
         // - switch 1: fuzz on/off
         // - switch 2: oscillator on/off
         // - switch 3: sub oscillator on/off
-        // - switch 4: vibrato mode
+        // - switch 4: osc-fx bypass (raw wave)
         // Stability fixed to midpoint (50%).
         params.pll_error_filter_alpha = CenteredStability(0.5f);
 
