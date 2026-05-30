@@ -43,6 +43,7 @@ public:
         bool deep_sub_mode = false;
         bool raw_osc_only = false;
         bool use_vco_phase_output = true;
+        bool vibrato_mode = false;
     };
 
     void Init(float sample_rate_hz)
@@ -191,11 +192,10 @@ private:
 
     bool DetectVcoRisingEdge()
     {
-        // Stable glide mode: phase detector follows the PLL control oscillator.
-        const float phase_step = vco_frequency / sample_rate;
-
-        // Vibrato mode (intentionally unstable/cool): use glide_frequency instead.
-        // const float phase_step = glide_frequency / sample_rate;
+        // Stable mode: detector follows PLL control oscillator.
+        // Vibrato mode: detector follows gliding output oscillator.
+        const float source_frequency = params.vibrato_mode ? glide_frequency : vco_frequency;
+        const float phase_step = source_frequency / sample_rate;
 
         const float next_phase = vco_phase + phase_step;
         const bool edge = (vco_phase < 0.5f) && (next_phase >= 0.5f);
