@@ -5,6 +5,7 @@
 
 #include <util/LinearRamp.h>
 #include <util/Mapping.h>
+#include <util/PersistentSettings.h>
 #include <util/PLL.h>
 #include <util/Terrarium.h>
 
@@ -32,6 +33,28 @@ struct ControlState
     std::array<float, 6> knobs{};
     std::array<bool, 4> toggles{};
 };
+
+StoredControlState ToStoredControlState(const ControlState& state)
+{
+    StoredControlState stored{};
+    stored.knobs = state.knobs;
+    for (size_t i = 0; i < stored.toggles.size(); ++i)
+    {
+        stored.toggles[i] = state.toggles[i] ? 1 : 0;
+    }
+    return stored;
+}
+
+ControlState FromStoredControlState(const StoredControlState& stored)
+{
+    ControlState state{};
+    state.knobs = stored.knobs;
+    for (size_t i = 0; i < stored.toggles.size(); ++i)
+    {
+        state.toggles[i] = (stored.toggles[i] != 0);
+    }
+    return state;
+}
 
 ControlState ReadControlState(
     daisy::AnalogControl& knob_osc_multiplier,
@@ -217,8 +240,15 @@ int main()
     params.glide_speed = 0.25f;
     pll.SetParams(params);
 
+    Settings persisted = loadSettings();
+    effect_enabled = (persisted.effect_enabled != 0);
+
     ControlState saved_state{};
-    bool saved_state_valid = false;
+    bool saved_state_valid = (persisted.preset_valid != 0);
+    if (saved_state_valid)
+    {
+        saved_state = FromStoredControlState(persisted.preset_state);
+    }
     ControlState pre_preset_state{};
 
     bool preset_active = false;
@@ -228,10 +258,22 @@ int main()
     constexpr uint32_t long_press_samples = 200; // 1 second at 200 Hz loop.
     constexpr uint32_t save_led_flash_ms = 160;
 
+    auto persist_state = [&]() {
+        persisted.version = 1;
+        persisted.preset_valid = saved_state_valid ? 1 : 0;
+        persisted.effect_enabled = effect_enabled ? 1 : 0;
+        if (saved_state_valid)
+        {
+            persisted.preset_state = ToStoredControlState(saved_state);
+        }
+        saveSettings(terrarium.seed.qspi, persisted);
+    };
+
     terrarium.Loop(200, [&]() {
         if (stomp_effect.RisingEdge())
         {
             effect_enabled = !effect_enabled;
+            persist_state();
         }
 
         const ControlState live_state = ReadControlState(
@@ -262,6 +304,7 @@ int main()
                 preset_save_mode = true;
                 saved_state = live_state;
                 saved_state_valid = true;
+                persist_state();
             }
         }
 
@@ -287,6 +330,7 @@ int main()
                         // If nothing has been saved yet, initialize from current state.
                         saved_state = live_state;
                         saved_state_valid = true;
+                        persist_state();
                     }
                     preset_active = true;
                 }
