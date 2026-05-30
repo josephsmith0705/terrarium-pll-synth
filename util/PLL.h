@@ -29,6 +29,8 @@ public:
         float trigger_ratio = 0.2f;
         float wave_shape = 1.0f; // 0..3
         float sub_wave_shape = 1.0f; // 0..3
+        float main_pitch_multiplier = 2.0f;
+        float sub_pitch_multiplier = 0.5f;
         float pll_kp_hz = 180.0f;
         float pll_ki_hz = 0.25f;
         float pll_error_filter_alpha = 0.0035f;
@@ -106,11 +108,28 @@ public:
             sub_voice = GenerateSubOscillatorVoice();
         }
 
+        const float fuzz_contrib = fuzz_voice * params.fuzz_level;
+        const float osc_contrib = osc_voice * params.osc_level;
+        const float sub_contrib = sub_voice * params.sub_level;
+
+        const float additive_mix = fuzz_contrib + osc_contrib + sub_contrib;
+
+        // Heterodyne-style interaction terms: these products create sidebands and
+        // make the three voices feel like one fused sound source.
+        const float pairwise_interaction =
+            (fuzz_contrib * osc_contrib) +
+            (fuzz_contrib * sub_contrib) +
+            (osc_contrib * sub_contrib);
+        const float triple_interaction = fuzz_contrib * osc_contrib * sub_contrib;
+
         const float mix =
-            (fuzz_voice * params.fuzz_level) +
-            (osc_voice * params.osc_level) +
-            (sub_voice * params.sub_level);
-        const float wet = mix * shaped * params.master_level;
+            (additive_mix * voice_additive_mix) +
+            (pairwise_interaction * voice_pairwise_mix) +
+            (triple_interaction * voice_triple_mix);
+
+        // Saturate the combined bus lightly to mimic analog summing headroom.
+        const float glued_mix = std::tanh(mix * voice_bus_drive);
+        const float wet = glued_mix * shaped * params.master_level;
 
         return wet;
     }
@@ -125,6 +144,8 @@ public:
         params.trigger_ratio = std::clamp(params.trigger_ratio, 0.0f, 1.0f);
         params.wave_shape = std::clamp(params.wave_shape, 0.0f, 3.0f);
         params.sub_wave_shape = std::clamp(params.sub_wave_shape, 0.0f, 3.0f);
+        params.main_pitch_multiplier = std::clamp(params.main_pitch_multiplier, 1.0f, 4.0f);
+        params.sub_pitch_multiplier = std::clamp(params.sub_pitch_multiplier, 0.125f, 0.75f);
         params.pll_kp_hz = std::clamp(params.pll_kp_hz, 20.0f, 800.0f);
         params.pll_ki_hz = std::clamp(params.pll_ki_hz, 0.0f, 3.0f);
         params.pll_error_filter_alpha = std::clamp(params.pll_error_filter_alpha, 0.0005f, 0.05f);
@@ -264,17 +285,26 @@ private:
         }
 
         glide_frequency = std::clamp(glide_frequency, 0.0f, max_frequency_hz);
+        const float main_frequency = std::clamp(
+            glide_frequency * params.main_pitch_multiplier,
+            0.0f,
+            max_frequency_hz);
 
-        phase.set(glide_frequency, sample_rate);
+        phase.set(main_frequency, sample_rate);
         const float signal = wave_synth.compensated(phase);
         phase++;
         AdvancePhases();
-        return params.use_vco_phase_output ? output_phase : signal;
+        return params.use_vco_phase_output
+            ? RenderShapedPhase(output_phase, params.wave_shape)
+            : signal;
     }
 
     float GenerateSubOscillatorVoice()
     {
-        const float sub_frequency = std::clamp(vco_frequency * 0.5f, 0.0f, max_frequency_hz);
+        const float sub_frequency = std::clamp(
+            vco_frequency * params.sub_pitch_multiplier,
+            0.0f,
+            max_frequency_hz);
 
         if (params.use_vco_phase_output)
         {
@@ -283,7 +313,7 @@ private:
             {
                 sub_vco_phase -= 1.0f;
             }
-            return sub_vco_phase;
+            return RenderShapedPhase(sub_vco_phase, params.sub_wave_shape);
         }
 
         sub_phase.set(sub_frequency, sample_rate);
@@ -300,11 +330,31 @@ private:
             vco_phase -= 1.0f;
         }
 
-        output_phase += glide_frequency / sample_rate;
+        output_phase += (glide_frequency * params.main_pitch_multiplier) / sample_rate;
         if (output_phase >= 1.0f)
         {
             output_phase -= 1.0f;
         }
+    }
+
+    float RenderShapedPhase(float phase_value, float shape) const
+    {
+        const float ph = phase_value - std::floor(phase_value);
+        const float pulse = (ph < 0.2f) ? 1.0f : -1.0f;
+        const float square = (ph < 0.5f) ? 1.0f : -1.0f;
+        const float triangle = 1.0f - (4.0f * std::abs(ph - 0.5f));
+        const float saw = (2.0f * ph) - 1.0f;
+
+        const float s = std::clamp(shape, 0.0f, 3.0f);
+        if (s < 1.0f)
+        {
+            return std::lerp(pulse, square, s);
+        }
+        if (s < 2.0f)
+        {
+            return std::lerp(square, triangle, s - 1.0f);
+        }
+        return std::lerp(triangle, saw, s - 2.0f);
     }
 
     static constexpr float min_frequency_hz = 30.0f;
@@ -341,6 +391,10 @@ private:
     static constexpr float mute_frequency_hz = 0.7f;
     static constexpr float fuzz_drive = 2.0f;
     static constexpr float fuzz_makeup_gain = 1.35f;
+    static constexpr float voice_additive_mix = 0.55f;
+    static constexpr float voice_pairwise_mix = 0.32f;
+    static constexpr float voice_triple_mix = 0.13f;
+    static constexpr float voice_bus_drive = 1.45f;
 
     Fuzz fuzz;
     NoiseSynth noise_synth;

@@ -7,8 +7,13 @@ Firmware for a fuzzed PLL synth pedal on Daisy Seed + Terrarium hardware.
 Switch 1 enables/disables fuzz voice
 Switch 2 enables/disables osc voice 
 Switch 3 enables/disables sub osc voice 
-Knob 2: tracking speed
-Knob 3: stability (`pll_error_filter_alpha`)
+
+Knob 1: Oscillator pitch
+Knob 2: Fuzz level
+Knob 3: Glide speed
+Knob 4: Sub-oscillator pitch
+Knob 5: Sub-oscillator level
+Knob 6: Master level
 
 Left stomp: effect bypass toggle.
 
