@@ -65,6 +65,7 @@ public:
         gate = q::noise_gate{-120_dB};
         gate_ramp = LinearRamp{0.0f, 0.008f};
         output_mute_ramp = LinearRamp{0.0f, 0.0025f};
+        cross_wah_filter.config(800_Hz, sample_rate, 0.8f);
 
         wave_synth.setShape(1.0f);
         sub_wave_synth.setShape(2.2f);
@@ -84,7 +85,7 @@ public:
 
         wave_synth.setShape(params.wave_shape);
         const float osc_signal = GenerateMainOscillator();
-        const float osc_voice = osc_signal;
+        float osc_voice = osc_signal;
         sub_wave_synth.setShape(params.sub_wave_shape);
 
         const float envelope = params.envelope_follow ? dry_envelope : 1.0f;
@@ -102,6 +103,30 @@ public:
         const float fuzz_input = std::clamp(dry_signal * fuzz_drive, -1.0f, 1.0f);
         float fuzz_voice = fuzz.Process(fuzz_input, fuzz_threshold * 0.5f);
         fuzz_voice = std::clamp(fuzz_voice * fuzz_makeup_gain, -1.0f, 1.0f);
+
+        // Emphasize interaction at slower glide, but keep enough dry oscillator
+        // body so the tone does not collapse into a thin ring-mod texture.
+        const float slow_glide_emphasis = 1.0f - std::clamp(params.glide_speed, 0.0f, 1.0f);
+
+        // Multiply-based voice coupling with gate-controlled snap.
+        // When fuzz is active, blend osc with (osc * fuzz) product for interactive ring-mod character.
+        // When fuzz is silent, snap directly to pure VCO to preserve presence.
+        if (gate_state)
+        {
+            const float fuzz_multiply_blend = std::lerp(
+                osc_multiply_blend_fast,
+                osc_multiply_blend_slow,
+                slow_glide_emphasis);
+            const float osc_times_fuzz = osc_voice * fuzz_voice;
+            osc_voice = std::lerp(osc_voice, osc_times_fuzz, fuzz_multiply_blend);
+        }
+        else
+        {
+            // Fuzz gate closed: snap to pure VCO (no muting from multiplication)
+            osc_voice = osc_signal;
+        }
+        osc_voice = std::tanh(osc_voice * osc_body_drive);
+        osc_voice = std::lerp(osc_signal, osc_voice, osc_fx_mix);
 
         float sub_voice = 0.0f;
         if (params.sub_enabled)
@@ -384,9 +409,9 @@ private:
     float filtered_phase_error = 0.0f;
     float pll_integrator = 0.0f;
 
-    static constexpr float glide_slew_min = 0.0002f;
+    static constexpr float glide_slew_min = 0.00005f;
     static constexpr float glide_slew_max = 0.02f;
-    static constexpr float glide_target_follow_slew = 0.015f;
+    static constexpr float glide_target_follow_slew = 0.006f;
     static constexpr float glide_lock_deadband_hz = 0.35f;
     static constexpr float mute_frequency_hz = 0.7f;
     static constexpr float fuzz_drive = 2.0f;
@@ -395,9 +420,14 @@ private:
     static constexpr float voice_pairwise_mix = 0.32f;
     static constexpr float voice_triple_mix = 0.13f;
     static constexpr float voice_bus_drive = 1.45f;
+    static constexpr float osc_multiply_blend_fast = 0.25f;
+    static constexpr float osc_multiply_blend_slow = 0.60f;
+    static constexpr float osc_body_drive = 1.6f;
+    static constexpr float osc_fx_mix = 0.82f;
 
     Fuzz fuzz;
     NoiseSynth noise_synth;
+    SvFilter cross_wah_filter;
     WaveSynth wave_synth;
     WaveSynth sub_wave_synth;
 
